@@ -145,6 +145,8 @@ class Settings:
             f"ASR 自动识别={'开启' if self.load_asr else '关闭'}；"
             f"数据目录={self.data_dir}；"
             f"特征缓存条数={self.feature_cache_size}；"
+            f"默认扩散步数={self.default_num_step}；"
+            f"默认引导系数={self.default_guidance_scale}；"
             f"日志级别={self.log_level}"
         )
 

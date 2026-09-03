@@ -138,6 +138,8 @@ docker stop omnivoice && docker start omnivoice   # 重启后特征与音频仍�
 | `PRELOAD_MODEL` | `true` | 启动时预加载模型（首次请求不再等待） |
 | `LOAD_ASR` / `ASR_MODEL` | `true` / `openai/whisper-large-v3-turbo` | 是否加载 ASR 用于自动识别参考文本 |
 | `ASR_DEVICE` | 空 | ASR 模型所在设备，如 `cuda:0` / `cpu` |
+| `DEFAULT_NUM_STEP` | `32` | 默认扩散步数，调低（如 16）可显著提速、显存更省 |
+| `DEFAULT_GUIDANCE_SCALE` | `2.0` | 默认 CFG 引导系数 |
 | `MAX_UPLOAD_MB` | `50` | 单个音频大小上限 |
 | `MAX_REF_DURATION` | `30` | 参考音频最长保留秒数（超出自动截断） |
 | `FEATURE_CACHE_SIZE` | `64` | 特征内存缓存条数（LRU） |
