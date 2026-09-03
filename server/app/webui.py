@@ -238,10 +238,9 @@ def _on_reextract(voice_id: str, ref_text: str):
 # ----------------------------------------------------------------------
 def build_ui() -> gr.Blocks:
     """构建 Gradio 页面。"""
-    # 使用系统字体栈，避免内网环境下请求 Google Fonts 导致页面加载缓慢
-    theme = gr.themes.Soft(
-        font=["system-ui", "-apple-system", "Segoe UI", "Microsoft YaHei", "sans-serif"]
-    )
+    # 显式使用 Gradio 系统字体栈：主题若识别为非系统字体，会自动去请求
+    # Google Fonts，内网环境无法访问会导致页面加载缓慢，因此这里固定为系统字体
+    theme = gr.themes.Soft(font=("ui-sans-serif", "system-ui", "sans-serif"))
     with gr.Blocks(
         title="OmniVoice 语音克隆服务",
         theme=theme,

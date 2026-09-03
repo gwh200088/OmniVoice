@@ -265,7 +265,7 @@ class VoiceCloneService:
                         max_duration=self.settings.max_ref_duration,
                     )
                 used_voice_id = meta["音色ID"]
-                prompt, _, _ = self.engine.extract_prompt(
+                prompt, text, source = self.engine.extract_prompt(
                     audio_path=meta["源音频文件路径"],
                     ref_text=ref_text or None,
                     timer=timer,
@@ -275,6 +275,8 @@ class VoiceCloneService:
                 self.store.mark_extracted(
                     used_voice_id,
                     elapsed_ms=timer.last_stage_ms("声纹特征提取"),
+                    ref_text=text,
+                    ref_text_source=source,
                 )
             else:
                 # 临时上传、用完即弃：转码到临时目录后直接提取特征
@@ -390,18 +392,6 @@ class VoiceCloneService:
                 os.remove(path)
         except OSError:
             pass
-
-
-class _Null:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-
-def _null():
-    return _Null()
 
 
 _service: Optional[VoiceCloneService] = None

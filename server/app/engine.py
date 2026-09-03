@@ -43,6 +43,22 @@ def resolve_device(explicit: str = "") -> str:
     return "cpu"
 
 
+def cuda_device_index(device: str) -> int:
+    """从设备字符串（如 ``cuda:1``）解析显卡编号。
+
+    多卡场景下用于获取对应编号的显卡信息与显存，避免固定取 0 号卡。
+    """
+    if ":" in device:
+        try:
+            return int(device.split(":")[-1])
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return int(torch.cuda.current_device())
+    except Exception:
+        return 0
+
+
 def resolve_dtype(name: str, device: str) -> torch.dtype:
     """确定计算精度。CPU 上强制使用 float32，避免 half 算子不支持。"""
     key = (name or "float16").lower()
@@ -127,9 +143,10 @@ class InferenceEngine:
             )
             if self.device.startswith("cuda"):
                 try:
-                    name = torch.cuda.get_device_name(0)
-                    total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-                    logger.info("显卡信息：%s，显存 %.1f GB", name, total)
+                    index = cuda_device_index(self.device)
+                    name = torch.cuda.get_device_name(index)
+                    total = torch.cuda.get_device_properties(index).total_memory / 1024**3
+                    logger.info("显卡信息：%s（编号 %d），显存 %.1f GB", name, index, total)
                 except Exception:  # 取显卡信息失败不影响主流程
                     pass
 
@@ -328,11 +345,7 @@ class InferenceEngine:
         if self.device.startswith("cuda") and torch.cuda.is_available():
             try:
                 # 多卡场景下按 DEVICE 指定的编号取显卡名，而不是固定取 0 号卡
-                if ":" in self.device:
-                    index = int(self.device.split(":")[-1])
-                else:
-                    index = torch.cuda.current_device()
-                device_name = torch.cuda.get_device_name(index)
+                device_name = torch.cuda.get_device_name(cuda_device_index(self.device))
             except Exception:
                 device_name = ""
         return {
