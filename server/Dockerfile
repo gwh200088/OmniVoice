@@ -15,7 +15,11 @@
 #   - 未安装 flash-attn：T4（Turing sm_75）不支持该算子，统一走 SDPA 注意力，
 #     保证 T4 / A10 / A100 等多种显卡环境通用。
 # ---------------------------------------------------------------------------
-ARG CUDA_IMAGE=12.8.1-cudnn-runtime-ubuntu22.04
+# 基础镜像，可通过 --build-arg CUDA_IMAGE=... 切换
+# 说明：PyTorch 的 pip 包自带 cuDNN 与 CUDA 运行库，因此使用 runtime 版本即可，
+# 无需 cudnn 版本；容器内 CUDA 版本无需与 torch 的 CUDA 版本严格一致，
+# 真正决定能否运行的是宿主机显卡驱动所支持的最高 CUDA 版本。
+ARG CUDA_IMAGE=12.4.1-runtime-ubuntu22.04
 FROM nvidia/cuda:${CUDA_IMAGE}
 
 # 是否使用国内镜像源加速 apt 下载（true / false）
@@ -95,12 +99,17 @@ RUN if [ -n "${PIP_INDEX_URL}" ]; then \
     fi
 
 # ---------------------------------------------------------------------------
-# PyTorch（CUDA 12.8 版本，适配 T4 / A10 / A100 等显卡）
+# PyTorch
+# TORCH_CUDA 需与宿主机驱动支持的 CUDA 版本匹配（torch 2.8.0 提供 cu126/cu128/cu129）：
+#   驱动较新（支持 12.8 及以上）→ 保持默认 cu128
+#   驱动较老（仅支持 12.6）      → --build-arg TORCH_CUDA=cu126
 # ---------------------------------------------------------------------------
+ARG TORCH_VERSION=2.8.0
+ARG TORCH_CUDA=cu128
 RUN python3 -m pip install \
-        torch==2.8.0+cu128 \
-        torchaudio==2.8.0+cu128 \
-        --extra-index-url https://download.pytorch.org/whl/cu128
+        torch==${TORCH_VERSION}+${TORCH_CUDA} \
+        torchaudio==${TORCH_VERSION}+${TORCH_CUDA} \
+        --extra-index-url https://download.pytorch.org/whl/${TORCH_CUDA}
 
 # ---------------------------------------------------------------------------
 # 安装 OmniVoice 本体
