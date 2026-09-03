@@ -139,13 +139,21 @@ class VoiceStore:
         raw_info = probe_audio_info(src_path)
 
         # 统一转码为模型友好的 wav，后续提取与复用都不再依赖 ffmpeg
-        normalize_to_wav(
-            src_path,
-            self.audio_path(voice_id),
-            sample_rate=sample_rate,
-            max_duration=max_duration,
-        )
-        norm_info = probe_audio_info(self.audio_path(voice_id))
+        try:
+            normalize_to_wav(
+                src_path,
+                self.audio_path(voice_id),
+                sample_rate=sample_rate,
+                max_duration=max_duration,
+            )
+            norm_info = probe_audio_info(self.audio_path(voice_id))
+        except Exception as exc:
+            # 转码失败时清理已建目录，避免残留没有内容的无效音色
+            shutil.rmtree(directory, ignore_errors=True)
+            logger.error(
+                "源音频转码失败，已清理该音色目录（音色ID=%s）：%s", voice_id, exc
+            )
+            raise
 
         meta = {
             "音色ID": voice_id,

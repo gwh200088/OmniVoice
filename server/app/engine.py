@@ -265,7 +265,12 @@ class InferenceEngine:
         device_name = ""
         if self.device.startswith("cuda") and torch.cuda.is_available():
             try:
-                device_name = torch.cuda.get_device_name(0)
+                # 多卡场景下按 DEVICE 指定的编号取显卡名，而不是固定取 0 号卡
+                if ":" in self.device:
+                    index = int(self.device.split(":")[-1])
+                else:
+                    index = torch.cuda.current_device()
+                device_name = torch.cuda.get_device_name(index)
             except Exception:
                 device_name = ""
         return {
