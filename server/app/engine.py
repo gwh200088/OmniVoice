@@ -79,6 +79,8 @@ class InferenceEngine:
             if self.model is not None:
                 return
 
+            self._check_model_assets()
+
             from omnivoice import OmniVoice
 
             if self.settings.hf_endpoint:
@@ -135,6 +137,66 @@ class InferenceEngine:
         """确保模型已加载（首次请求触发懒加载）。"""
         if self.model is None:
             self.load()
+
+    def _check_model_assets(self) -> None:
+        """检查模型文件是否就绪，避免内网环境下长时间等待下载超时。
+
+        离线模式（HF_HUB_OFFLINE=1）下，主模型、音频分词器、ASR 模型必须
+        全部为本地目录，缺失时直接报错并给出中文处置建议，而不是卡在下载上。
+        """
+        import os
+
+        offline = bool(self.settings.hf_hub_offline)
+        model_path = str(self.settings.model_id)
+
+        if not os.path.isdir(model_path):
+            if offline:
+                raise RuntimeError(
+                    f"已开启离线模式，但模型路径不是本地目录：{model_path}。"
+                    f"请先在联网环境下载模型并挂载进容器，再用 MODEL_ID 指向该目录。"
+                )
+            logger.warning(
+                "模型标识不是本地目录，将尝试联网下载：%s；"
+                "内网环境会失败，建议改为挂载本地模型目录。",
+                model_path,
+            )
+            return
+
+        # 主模型目录缺少该子目录时，OmniVoice 会去联网下载
+        # eustlb/higgs-audio-v2-tokenizer，内网环境必须提前准备好
+        audio_tokenizer_dir = os.path.join(model_path, "audio_tokenizer")
+        if not os.path.isdir(audio_tokenizer_dir):
+            detail = (
+                f"模型目录下缺少音频分词器子目录：{audio_tokenizer_dir}。"
+                f"请在联网环境下载 eustlb/higgs-audio-v2-tokenizer 并放到该位置。"
+            )
+            if offline:
+                raise RuntimeError(f"已开启离线模式，{detail}")
+            logger.warning("%s 当前将尝试联网下载，内网环境会失败。", detail)
+
+        if self.settings.load_asr:
+            asr_path = str(self.settings.asr_model or "").strip()
+            if not asr_path:
+                raise RuntimeError(
+                    "已开启 ASR 自动识别，但未指定 ASR_MODEL。"
+                    "离线部署请下载 Whisper 模型并用 ASR_MODEL 指向本地目录，"
+                    "或设置 LOAD_ASR=false 改为手动填写参考文本。"
+                )
+            if not os.path.isdir(asr_path):
+                if offline:
+                    raise RuntimeError(
+                        f"已开启离线模式，但 ASR 模型路径不是本地目录：{asr_path}。"
+                        f"请下载 Whisper 模型并挂载进容器，或设置 LOAD_ASR=false。"
+                    )
+                logger.warning(
+                    "ASR 模型路径不是本地目录，将尝试联网下载：%s；内网环境会失败。",
+                    asr_path,
+                )
+
+        if offline:
+            logger.info(
+                "离线模式预检通过：主模型、音频分词器、ASR 模型均为本地文件。"
+            )
 
     # ------------------------------------------------------------------
     # 特征提取

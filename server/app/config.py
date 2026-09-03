@@ -83,6 +83,7 @@ class Settings:
     asr_model: str = "openai/whisper-large-v3-turbo"
     asr_device: str = ""
     hf_endpoint: str = ""
+    hf_hub_offline: bool = False
 
     # ---------------- 数据目录 ----------------
     data_dir: Path = field(default_factory=lambda: Path(env_str("DATA_DIR", str(BASE_DIR / "data"))))
@@ -143,6 +144,7 @@ class Settings:
             f"计算精度={self.dtype}；"
             f"注意力实现={self.attn_implementation or '自动选择'}；"
             f"ASR 自动识别={'开启' if self.load_asr else '关闭'}；"
+            f"模型加载模式={'离线（禁止联网）' if self.hf_hub_offline else '允许联网'}；"
             f"数据目录={self.data_dir}；"
             f"特征缓存条数={self.feature_cache_size}；"
             f"默认扩散步数={self.default_num_step}；"
@@ -171,6 +173,7 @@ def load_settings() -> Settings:
         asr_model=env_str("ASR_MODEL", "openai/whisper-large-v3-turbo"),
         asr_device=env_str("ASR_DEVICE", ""),
         hf_endpoint=env_str("HF_ENDPOINT", ""),
+        hf_hub_offline=env_bool("HF_HUB_OFFLINE", False),
         # 数据
         target_sample_rate=env_int("TARGET_SAMPLE_RATE", 24000),
         # 音频

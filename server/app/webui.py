@@ -238,8 +238,13 @@ def _on_reextract(voice_id: str, ref_text: str):
 # ----------------------------------------------------------------------
 def build_ui() -> gr.Blocks:
     """构建 Gradio 页面。"""
+    # 使用系统字体栈，避免内网环境下请求 Google Fonts 导致页面加载缓慢
+    theme = gr.themes.Soft(
+        font=["system-ui", "-apple-system", "Segoe UI", "Microsoft YaHei", "sans-serif"]
+    )
     with gr.Blocks(
         title="OmniVoice 语音克隆服务",
+        theme=theme,
         css=".gradio-container {max-width: 1200px !important;}",
     ) as demo:
         gr.Markdown(

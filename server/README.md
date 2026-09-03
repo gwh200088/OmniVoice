@@ -125,13 +125,112 @@ docker stop omnivoice && docker start omnivoice   # 重启后特征与音频仍�
 
 ---
 
-## 三、环境变量
+## 三、内网离线部署（无外网环境）
+
+服务在启动时**默认会尝试联网下载模型**，内网环境必须提前准备好全部模型文件并挂载进容器。
+
+### 3.1 需要准备哪些文件
+
+| 文件 | 来源 | 是否必须 |
+| --- | --- | --- |
+| 主模型 | `k2-fsa/OmniVoice` | 必须 |
+| 音频分词器 | `eustlb/higgs-audio-v2-tokenizer` | 主模型目录中若无 `audio_tokenizer` 子目录，则必须单独准备 |
+| ASR 模型 | `openai/whisper-large-v3-turbo` | 开启 `LOAD_ASR=true` 时必须 |
+
+> ⚠️ **最容易踩的坑**：OmniVoice 在主模型目录下找不到 `audio_tokenizer` 子目录时，会自动去下载 `eustlb/higgs-audio-v2-tokenizer`。很多人只下载了主模型，结果内网启动就卡在下载上。请务必确认该子目录存在。
+
+### 3.2 在联网机器上下载
+
+```bash
+# 主模型
+huggingface-cli download k2-fsa/OmniVoice --local-dir ./models/OmniVoice
+
+# 音频分词器（先确认主模型目录里是否已自带，没有再下载）
+ls ./models/OmniVoice/audio_tokenizer
+huggingface-cli download eustlb/higgs-audio-v2-tokenizer \
+  --local-dir ./models/OmniVoice/audio_tokenizer
+
+# ASR 模型（需要自动识别参考音频文本时）
+huggingface-cli download openai/whisper-large-v3-turbo \
+  --local-dir ./models/whisper-large-v3-turbo
+```
+
+国内网络可先执行 `export HF_ENDPOINT=https://hf-mirror.com` 加速。
+
+最终目录形如：
+
+```
+models/
+├── OmniVoice/
+│   ├── config.json
+│   ├── *.safetensors
+│   └── audio_tokenizer/     ← 关键，缺失会导致联网
+└── whisper-large-v3-turbo/
+```
+
+### 3.3 镜像导入内网
+
+镜像在联网机器上构建好后导出，再在内网机器导入（内网无需 pip 下载）：
+
+```bash
+# 外网机器
+docker save omnivoice-service:latest -o omnivoice-service.tar
+
+# 内网机器
+docker load -i omnivoice-service.tar
+```
+
+### 3.4 内网启动命令
+
+```bash
+docker run -d --name omnivoice --gpus '"device=0"' -p 8000:8000 \
+  -v /data/omnivoice/data:/opt/omnivoice-service/data \
+  -v /data/omnivoice/models:/opt/models \
+  -e MODEL_ID=/opt/models/OmniVoice \
+  -e ASR_MODEL=/opt/models/whisper-large-v3-turbo \
+  -e HF_HUB_OFFLINE=1 \
+  -e DEVICE=cuda:0 -e DTYPE=float16 \
+  -e DEFAULT_NUM_STEP=16 \
+  omnivoice-service:latest
+```
+
+关键参数说明：
+
+- `MODEL_ID` / `ASR_MODEL` 必须指向**容器内的本地目录**（绝对路径）
+- `HF_HUB_OFFLINE=1`：禁止任何联网行为。其作用有二：一是让 transformers / huggingface_hub 走纯离线加载；二是服务启动时会做**离线预检**，任一模型文件缺失都立即报出中文错误，而不是卡在下载超时上
+- 若不需要自动识别参考文本，可设 `LOAD_ASR=false`，这样就不必准备 Whisper 模型（上传音色时手动填写参考文本即可）
+
+### 3.5 离线预检的错误提示
+
+启动日志会打印加载模式，便于确认：
+
+```
+配置摘要：...；ASR 自动识别=开启；模型加载模式=离线（禁止联网）；...
+离线模式预检通过：主模型、音频分词器、ASR 模型均为本地文件。
+```
+
+若文件缺失，服务会**直接退出**（离线模式下配置错误无法自动恢复，避免"启动成功却不可用"），并打印中文处置建议，例如：
+
+```
+模型预加载失败：已开启离线模式，模型目录下缺少音频分词器子目录：
+/opt/models/OmniVoice/audio_tokenizer。请在联网环境下载
+eustlb/higgs-audio-v2-tokenizer 并放到该位置。
+离线模式下模型加载失败，服务无法正常工作，正在退出。请检查模型挂载路径、MODEL_ID 与 ASR_MODEL 配置。
+```
+
+### 3.6 其它离线注意事项
+
+- **Web 页面**：Gradio 前端资源已打包在镜像内，无需外网；页面字体已改为系统字体栈，不会请求 Google Fonts
+- **Gradio 遥测**：镜像已设置 `GRADIO_ANALYTICS_ENABLED=false`，不会向外发送统计请求
+- **不要设置 `HF_ENDPOINT`**：内网环境保持为空即可
+
+## 四、环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | 服务监听地址与端口 |
 | `UI_PATH` / `API_PREFIX` | `/ui` / `/api/v1` | Web 页面路径、接口前缀 |
-| `MODEL_ID` | `k2-fsa/OmniVoice` | 模型标识或本地路径 |
+| `MODEL_ID` | `k2-fsa/OmniVoice` | 模型标识或本地目录；内网部署必须指向容器内的绝对路径 |
 | `DEVICE` | 空（自动检测） | 如 `cuda:0`、`cpu` |
 | `DTYPE` | `float16` | `float16` / `bfloat16` / `float32`（CPU 自动转 float32） |
 | `ATTN_IMPLEMENTATION` | 空（自动） | 注意力实现，如 `sdpa` |
@@ -147,9 +246,10 @@ docker stop omnivoice && docker start omnivoice   # 重启后特征与音频仍�
 | `ENABLE_WEBUI` | `true` | 是否启用 Web 页面 |
 | `LOG_LEVEL` / `LOG_TO_FILE` | `INFO` / `true` | 日志级别、是否写日志文件 |
 | `DATA_DIR` | `/opt/omnivoice-service/data` | 数据根目录 |
-| `HF_ENDPOINT` | 空 | HuggingFace 镜像，如 `https://hf-mirror.com` |
+| `HF_ENDPOINT` | 空 | HuggingFace 镜像，如 `https://hf-mirror.com`；内网环境保持为空 |
+| `HF_HUB_OFFLINE` | `0` | 设为 `1` 启用离线模式：禁止联网并做启动预检，模型缺失时直接报错退出 |
 
-## 四、不同显卡环境建议
+## 五、不同显卡环境建议
 
 | 显卡 | 建议参数 | 说明 |
 | --- | --- | --- |
@@ -162,14 +262,14 @@ docker stop omnivoice && docker start omnivoice   # 重启后特征与音频仍�
 
 ---
 
-## 五、Web 页面使用
+## 六、Web 页面使用
 
 浏览器访问：`http://<服务器IP>:8000/ui`
 
 - **语音合成**：输入文本 → 选择"使用已保存音色"（下拉选择）或"临时上传音频" → 点击"开始合成" → 查看音频与各阶段耗时。
 - **音色管理**：上传音频（可勾选"上传后立即提取并保存特征"）→ 在列表中查看音色 ID、时长、是否已提取特征 → 支持删除与重新提取。
 
-## 六、接口说明
+## 七、接口说明
 
 接口文档（Swagger）：`http://<服务器IP>:8000/docs`
 
@@ -268,7 +368,7 @@ curl -X POST "http://127.0.0.1:8000/api/v1/tts/base64" \
 
 ---
 
-## 七、日志与耗时
+## 八、日志与耗时
 
 全流程中文日志，同时输出到控制台（`docker logs -f omnivoice`）与 `data/logs/service.log`。示例：
 
@@ -286,14 +386,14 @@ curl -X POST "http://127.0.0.1:8000/api/v1/tts/base64" \
 
 ---
 
-## 八、运行机制说明
+## 九、运行机制说明
 
 - **单进程串行推理**：服务默认单进程运行，推理过程加锁串行执行。并发请求会自动排队，不会因抢显存导致 OOM；如需更高吞吐，可部署多个容器并分别绑定不同显卡（`--gpus '"device=1"'`）。
 - **特征复用流程**：源音频首次上传时转码 + 提取特征并落盘；之后每次合成只加载 `prompt.pt`，不再重复做静音裁剪、音频编码与 ASR 识别，因此第二次起耗时会明显下降（日志中体现为"加载已保存特征"而非"声纹特征提取"）。
 - **结果文件累积**：开启 `SAVE_OUTPUT` 后，合成结果会持续写入 `data/outputs/`，长期运行建议定期清理或挂载较大磁盘；设置 `SAVE_OUTPUT=false` 可只返回音频、不落盘。
 - **可选参数请勿传空值**：`num_step`、`speed`、`duration` 等可选参数不传即可，不要传空字符串（例如 `-F "speed="`），否则接口会返回 422 参数校验错误。
 
-## 九、常见问题
+## 十、常见问题
 
 **1. 首次启动很慢？**
 首次需要下载模型（约数 GB）。请把 `/opt/models` 挂载到宿主机，后续重建容器无需重新下载。

@@ -58,8 +58,16 @@ async def lifespan(app: FastAPI):
     if settings.preload_model:
         try:
             get_engine(settings).load()
-        except Exception as exc:  # 预加载失败不阻断启动，接口会按需再试
-            logger.error("模型预加载失败，将在首次请求时重试。失败原因：%s", exc)
+        except Exception as exc:
+            logger.error("模型预加载失败：%s", exc)
+            if settings.hf_hub_offline:
+                # 离线模式下配置错误无法自动恢复，直接退出避免"启动成功却不可用"
+                logger.error(
+                    "离线模式下模型加载失败，服务无法正常工作，正在退出。"
+                    "请检查模型挂载路径、MODEL_ID 与 ASR_MODEL 配置。"
+                )
+                raise
+            logger.error("将在首次请求时重试。")
     else:
         logger.info("已关闭模型预加载，首次请求时自动加载模型。")
 
