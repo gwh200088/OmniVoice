@@ -1,0 +1,5 @@
+# 服务自身依赖（PyTorch 与 OmniVoice 由 Dockerfile 单独安装）
+fastapi>=0.110.0
+uvicorn>=0.27.0
+python-multipart>=0.0.9
+gradio>=4.0.0

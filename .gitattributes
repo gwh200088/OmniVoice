@@ -1,0 +1,8 @@
+# 保证与 Docker 构建、Linux 容器运行相关的文件始终使用 LF 换行，
+# 避免在 Windows 上检出后构建镜像时因 CRLF 导致解析失败。
+* text=auto
+
+server/** text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.dockerignore text eol=lf
