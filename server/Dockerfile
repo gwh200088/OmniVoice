@@ -24,6 +24,8 @@ FROM nvidia/cuda:${CUDA_IMAGE}
 
 # 是否使用国内镜像源加速 apt 下载（true / false）
 ARG USE_CN_MIRROR=false
+# apt 镜像源地址（USE_CN_MIRROR=true 时生效）
+ARG APT_MIRROR=https://mirrors.aliyun.com/ubuntu/
 # pip 源地址，留空则使用官方源
 ARG PIP_INDEX_URL=
 
@@ -68,11 +70,17 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PIP_NO_CACHE_DIR=1
 
 # ---------------------------------------------------------------------------
+# apt 网络容错：加大超时并自动重试，避免源站抖动导致构建中断
+# ---------------------------------------------------------------------------
+RUN printf 'Acquire::Retries "10";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\n' \
+    > /etc/apt/apt.conf.d/99-custom-retries
+
+# ---------------------------------------------------------------------------
 # 系统依赖
 # ffmpeg：用于 mp3 / m4a / aac 等压缩音频格式的解码与转码
 # ---------------------------------------------------------------------------
 RUN if [ "$USE_CN_MIRROR" = "true" ]; then \
-        sed -i 's|http://archive.ubuntu.com/ubuntu/|https://mirrors.aliyun.com/ubuntu/|g; s|http://security.ubuntu.com/ubuntu/|https://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list || true; \
+        sed -i "s|http://archive.ubuntu.com/ubuntu/|${APT_MIRROR}|g; s|http://security.ubuntu.com/ubuntu/|${APT_MIRROR}|g" /etc/apt/sources.list || true; \
     fi \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -94,9 +102,11 @@ RUN python3 -m pip install --upgrade pip setuptools wheel
 # pip 源配置（可选）
 # 必须在 pip 安装完成后执行，否则配置不生效
 # ---------------------------------------------------------------------------
-RUN if [ -n "${PIP_INDEX_URL}" ]; then \
-        python3 -m pip config set global.index-url "${PIP_INDEX_URL}"; \
-    fi
+RUN python3 -m pip config set global.retries 10 \
+    && python3 -m pip config set global.timeout 60 \
+    && if [ -n "${PIP_INDEX_URL}" ]; then \
+           python3 -m pip config set global.index-url "${PIP_INDEX_URL}"; \
+       fi
 
 # ---------------------------------------------------------------------------
 # PyTorch
