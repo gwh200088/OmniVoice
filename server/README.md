@@ -271,7 +271,9 @@ eustlb/higgs-audio-v2-tokenizer 并放到该位置。
 
 ## 七、接口说明
 
-接口文档（Swagger）：`http://<服务器IP>:8000/docs`
+> **完整接口文档**（Swagger 风格，含全部参数、响应字段、示例与错误码）：[`server/API.md`](API.md)
+
+交互式接口文档（Swagger UI）：`http://<服务器IP>:8000/docs`
 
 ### 1. 上传源音频并创建音色
 
