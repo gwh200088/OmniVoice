@@ -303,6 +303,77 @@ docker run -d --name omnivoice-cpu -p 8000:8000 \
 - **线程控制**：默认占用所有 CPU 核心，如需限制可加 `-e OMP_NUM_THREADS=8`
 - **关闭 ASR 后**：上传音色时需手动填写参考音频对应的文本（合成质量不受影响）
 
+### 5.1.1 CPU 提速方案
+
+CPU 上无法达到 GPU 的秒级响应，优化目标是把"分钟级"压缩到可接受范围。按投入从低到高分为三层。
+
+#### 第一层：调整启动参数（无需改代码）
+
+按收益从大到小：
+
+| 手段 | 参数 | 预期收益 | 代价 |
+| --- | --- | --- | --- |
+| 降低扩散步数 | `DEFAULT_NUM_STEP=8` | 32 → 8 约省 75% 耗时（**最大杠杆**） | 音质下降，需实测找平衡点 |
+| 限制线程数 | `OMP_NUM_THREADS=<物理核数>` | 约 10~30% | 无 |
+| 缩短参考音频 | `MAX_REF_DURATION=8` | 特征提取省 30~50% | 参考信息变少 |
+| 关闭 ASR | `LOAD_ASR=false` | 上传音色从分钟级降至秒级 | 需手动填写参考文本 |
+| 复用已保存特征 | 已有机制，无需配置 | 第二次起省掉全部特征提取 | 无 |
+
+完整示例：
+
+```bash
+docker run -d --name omnivoice-cpu -p 8000:8000 \
+  -v /data/omnivoice/data:/opt/omnivoice-service/data \
+  -v /data/models:/opt/models \
+  -e MODEL_ID=/opt/models/OmniVoice \
+  -e DEVICE=cpu -e DTYPE=float32 \
+  -e DEFAULT_NUM_STEP=8 \
+  -e MAX_REF_DURATION=8 \
+  -e LOAD_ASR=false \
+  -e HF_HUB_OFFLINE=1 \
+  -e OMP_NUM_THREADS=16 \
+  omnivoice-service:latest
+```
+
+`OMP_NUM_THREADS` 建议填**物理核心数**（不是超线程数）：
+
+```bash
+nproc                                               # 查看逻辑核数
+lscpu | grep -E 'Core\(s\) per socket|Socket\(s\)'  # 物理核数 = Core(s) × Socket(s)
+```
+
+**确定最佳步数的方法**：同一段文本分别用 32 / 16 / 8 合成，对比接口返回的 `语音合成` 阶段耗时，选一个"听感可接受 + 耗时可容忍"的值。经验上 12~16 是性价比拐点，8 是极限。
+
+#### 第二层：CPU 专用加速（需额外适配）
+
+以下两项取决于 CPU 型号，收益可能很大：
+
+| 方案 | 适用条件 | 预期收益 | 说明 |
+| --- | --- | --- | --- |
+| 使用 bf16 精度 | CPU 支持 `AVX512_BF16` 或 `AMX` | 2~4 倍，且内存占用减半 | 当前 CPU 模式强制 float32，需放开精度限制 |
+| Intel Extension for PyTorch（IPEX） | Intel CPU | 再快 1.5~3 倍 | 镜像内加装 `intel-extension-for-pytorch`，加载时调用 `ipex.optimize()` |
+
+检测 CPU 指令集：
+
+```bash
+lscpu | grep -i -o -E 'amx_bf16|avx512_bf16|avx512f|avx2'
+lscpu | grep -E 'Model name|Core\(s\) per socket|Socket\(s\)'
+```
+
+- 输出包含 `amx_bf16` 或 `avx512_bf16` → 可启用 bf16
+- CPU 为 Intel 且较新（Sapphire Rapids 及以后）→ 可叠加 IPEX
+
+#### 第三层：架构层面
+
+- **批量合成**：CPU 多核在批处理时利用率更高。当前接口为单条串行，若是批量生成场景（一次性合成数百条），可增加批量接口提升吞吐
+- **保持容器常驻**：CPU 上模型加载需数分钟，务必保持 `PRELOAD_MODEL=true`，避免频繁重启容器
+
+#### 调优步骤建议
+
+1. 先按第一层配置跑通，用 `response_format=json` 读取 `语音合成` 阶段耗时作为基线
+2. 若仍不可接受，按第二层检测 CPU 指令集，具备条件则启用 bf16 / IPEX
+3. 若最终目标是 GPU 生产环境，CPU 调优够用即可，不必过度投入
+
 ---
 
 ## 六、Web 页面使用
