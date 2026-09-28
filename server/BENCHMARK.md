@@ -84,6 +84,57 @@ cp ref.wav /opt/bench/
 
 参考音频建议 3~10 秒、清晰人声，用于创建测试音色。
 
+### 2.5 服务器没有 Python 环境时：在容器内压测
+
+**镜像内已自带 Python 3.10 与 httpx**（随服务依赖安装），
+因此即使服务器宿主机没有 Python，也可以直接在容器内运行压测脚本，无需任何安装。
+
+**方式一：在服务容器内执行（最简单）**
+
+```bash
+# 把脚本与参考音频拷进运行中的容器
+docker exec omnivoice mkdir -p /opt/bench
+docker cp benchmark.py omnivoice:/opt/bench/
+docker cp ref.wav omnivoice:/opt/bench/
+
+# 创建测试音色
+docker exec omnivoice python3 /opt/bench/benchmark.py \
+  --url http://127.0.0.1:8000 \
+  --audio /opt/bench/ref.wav --auto-create --concurrency 1 --requests 3
+
+# 正式压测
+docker exec omnivoice python3 /opt/bench/benchmark.py \
+  --url http://127.0.0.1:8000 \
+  --voice-id <音色ID> \
+  --concurrency 1 2 4 --requests 20
+```
+
+容器内访问本机服务直接用 `http://127.0.0.1:8000`。
+
+**方式二：启动独立压测容器（数据更严谨）**
+
+用一个临时容器专门跑压测，避免与被测服务争抢 CPU：
+
+```bash
+docker run --rm --network host \
+  -v /opt/bench:/bench \
+  --entrypoint python3 \
+  omnivoice-service:latest \
+  /bench/benchmark.py --url http://127.0.0.1:8000 \
+  --voice-id <音色ID> --concurrency 1 2 4 --requests 20
+```
+
+- `--entrypoint python3`：覆盖启动脚本，不启动服务，只运行压测
+- `--network host`（Linux）：容器内 `127.0.0.1` 即宿主机
+- `--rm`：压测结束后自动清理容器
+
+> 压测脚本本身的 CPU 开销很小（主要是等待 HTTP 响应），方式一对结果的影响通常可忽略；
+> 若需要最严谨的数据，用方式二。
+
+> Windows / macOS 的 Docker Desktop 不支持 `--network host`，
+> 请改用 `--add-host=host.docker.internal:host-gateway`，
+> 并把 `--url` 换成 `http://host.docker.internal:8000`。
+
 ---
 
 ## 3. 启动服务
