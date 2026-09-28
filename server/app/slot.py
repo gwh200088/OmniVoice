@@ -28,7 +28,7 @@ class SlotLease:
     """一次推理的槽位租约，记录等待与显存信息。"""
 
     wait_ms: float = 0.0
-    free_before_mb: Optional[float] = None
+    capacity_before_mb: Optional[float] = None
 
 
 def _device_index(device: str) -> int:
@@ -51,11 +51,15 @@ class SlotManager:
         reserve_mb: float = 512.0,
         wait_timeout: float = 300.0,
         device: str = "",
+        utilization_limit: float = 0.0,
     ) -> None:
         self.max_concurrency = max(1, int(max_concurrency))
         self.reserve_mb = max(0.0, float(reserve_mb))
         self.wait_timeout = max(1.0, float(wait_timeout))
         self.device = device or ""
+        # 利用率软约束：0 表示关闭；达到该值即使显存够也不再放行
+        self.utilization_limit = max(0.0, min(100.0, float(utilization_limit)))
+        self._util_cache = (0.0, None)  # (采样时刻, 利用率)
 
         # 单次推理显存估算：0 表示自适应学习
         self._auto_estimate = float(slot_memory_mb) <= 0
@@ -112,6 +116,66 @@ class SlotManager:
         except Exception:
             return None
 
+    def torch_pool_mb(self) -> Optional[tuple]:
+        """返回本进程 (已分配 MB, 已预留 MB)，不可用返回 None。"""
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return None
+            index = _device_index(self.device)
+            return (
+                torch.cuda.memory_allocated(index) / 1024**2,
+                torch.cuda.memory_reserved(index) / 1024**2,
+            )
+        except Exception:
+            return None
+
+    def capacity_memory_mb(self) -> Optional[float]:
+        """真正可用于新张量分配的显存容量（MB）。
+
+        PyTorch 的缓存分配器在张量释放后会把显存留在进程缓存池中而不归还
+        驱动，因此「设备级剩余显存」会明显低估可用容量。这里把两部分相加：
+
+            可分配容量 = 缓存池空闲(reserved − allocated) + 设备级剩余(free)
+
+        这样可避免"显存其实够用、GPU 也很闲，却因设备级剩余偏低而被拒绝放行"。
+        """
+        if not self.is_cuda:
+            return None
+        free_mb = self.free_memory_mb()
+        if free_mb is None:
+            return None
+        pool = self.torch_pool_mb()
+        if pool is None:
+            return free_mb
+        allocated_mb, reserved_mb = pool
+        pool_free_mb = max(0.0, reserved_mb - allocated_mb)
+        return free_mb + pool_free_mb
+
+    def utilization_percent(self) -> Optional[float]:
+        """GPU 计算利用率（%），未安装 pynvml 或非 GPU 返回 None。
+
+        结果缓存 1 秒，避免等待轮询时频繁查询 NVML。
+        """
+        if not self.is_cuda:
+            return None
+        now = time.monotonic()
+        cached_at, cached_value = self._util_cache
+        if cached_value is not None and (now - cached_at) < 1.0:
+            return cached_value
+        value = None
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(_device_index(self.device))
+            value = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+        except Exception:
+            value = None
+        self._util_cache = (now, value)
+        return value
+
     # ------------------------------------------------------------------
     # 槽位申请与释放
     # ------------------------------------------------------------------
@@ -122,10 +186,23 @@ class SlotManager:
         if not self.is_cuda:
             # CPU 模式只受并发上限约束
             return True
-        free_mb = self.free_memory_mb()
-        if free_mb is None:
-            return True
-        return (free_mb - self.reserve_mb) >= self._estimate_mb
+
+        # 硬约束：可分配显存容量是否够一次推理（容量含进程缓存池空闲）
+        capacity_mb = self.capacity_memory_mb()
+        if capacity_mb is not None:
+            if (capacity_mb - self.reserve_mb) < self._estimate_mb:
+                return False
+
+        # 软约束：GPU 算力是否已饱和（显存够但利用率过高时不再放行，
+        # 避免并发只增加排队却不提升吞吐）
+        # 注意：仅当已有推理在跑时才拦截——否则显卡被其他进程占满时，
+        # 本服务会连第一个请求都放行不了，造成完全饿死。
+        if self.utilization_limit > 0 and self._active > 0:
+            util = self.utilization_percent()
+            if util is not None and util >= self.utilization_limit:
+                return False
+
+        return True
 
     def _acquire(self) -> bool:
         """申请槽位，成功返回 True，超时返回 False。"""
@@ -154,10 +231,12 @@ class SlotManager:
 
     def _release(self, lease: SlotLease) -> None:
         """释放槽位，并根据本次实际占用修正显存估算。"""
-        if self.is_cuda and lease.free_before_mb is not None:
-            free_now = self.free_memory_mb()
-            if free_now is not None:
-                used = lease.free_before_mb - free_now
+        if self.is_cuda and lease.capacity_before_mb is not None:
+            # 用可分配容量的变化衡量本次占用：推理结束后张量虽已释放，
+            # 但显存会留在缓存池中，容量因此下降，这正是一次推理的真实开销
+            capacity_now = self.capacity_memory_mb()
+            if capacity_now is not None:
+                used = lease.capacity_before_mb - capacity_now
                 if used > 0:
                     self._update_estimate(used)
 
@@ -199,7 +278,7 @@ class SlotManager:
                 f"请降低并发或调大 MAX_CONCURRENCY。"
             )
         lease.wait_ms = (time.perf_counter() - started) * 1000.0
-        lease.free_before_mb = self.free_memory_mb()
+        lease.capacity_before_mb = self.capacity_memory_mb()
 
         if lease.wait_ms >= 5.0:
             logger.info(
@@ -230,8 +309,20 @@ class SlotManager:
             "显存估算方式": "自适应学习" if self._auto_estimate else "手动指定",
             "显存安全预留(MB)": round(self.reserve_mb, 1),
         }
+        capacity_mb = self.capacity_memory_mb()
         if free_mb is not None:
-            data["当前可用显存(MB)"] = round(free_mb, 1)
+            data["设备级剩余显存(MB)"] = round(free_mb, 1)
+        if capacity_mb is not None:
+            data["可分配显存容量(MB)"] = round(capacity_mb, 1)
+        pool = self.torch_pool_mb()
+        if pool is not None:
+            data["进程已分配(MB)"] = round(pool[0], 1)
+            data["进程已预留(MB)"] = round(pool[1], 1)
+            data["缓存池空闲(MB)"] = round(max(0.0, pool[1] - pool[0]), 1)
         if total_mb is not None:
             data["显存总量(MB)"] = round(total_mb, 1)
+        if self.utilization_limit > 0 or self.is_cuda:
+            util = self.utilization_percent()
+            data["GPU利用率(%)"] = round(util, 1) if util is not None else "不可用"
+            data["利用率上限(%)"] = round(self.utilization_limit, 1)
         return data

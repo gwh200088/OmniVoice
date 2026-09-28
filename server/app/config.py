@@ -101,6 +101,7 @@ class Settings:
     max_concurrency: int = 0        # 0 = 自动（GPU 2 / CPU 1）
     gpu_slot_memory_mb: float = 0.0  # 0 = 自适应学习
     gpu_reserve_mb: float = 512.0
+    gpu_utilization_limit: float = 0.0  # 0 = 不限制利用率
     slot_wait_timeout: float = 300.0
 
     # ---------------- 日志 ----------------
@@ -199,6 +200,7 @@ def load_settings() -> Settings:
         max_concurrency=env_int("MAX_CONCURRENCY", 0),
         gpu_slot_memory_mb=env_float("GPU_SLOT_MEMORY_MB", 0.0),
         gpu_reserve_mb=env_float("GPU_RESERVE_MB", 512.0),
+        gpu_utilization_limit=env_float("GPU_UTILIZATION_LIMIT", 0.0),
         slot_wait_timeout=env_float("SLOT_WAIT_TIMEOUT", 300.0),
         # 日志
         log_level=env_str("LOG_LEVEL", "INFO").upper(),

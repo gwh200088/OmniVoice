@@ -86,6 +86,7 @@ class InferenceEngine:
             slot_memory_mb=self.settings.gpu_slot_memory_mb,
             reserve_mb=self.settings.gpu_reserve_mb,
             wait_timeout=self.settings.slot_wait_timeout,
+            utilization_limit=self.settings.gpu_utilization_limit,
         )
         self._load_time_ms: float = 0.0
 
