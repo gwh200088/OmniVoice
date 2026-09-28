@@ -260,6 +260,49 @@ eustlb/higgs-audio-v2-tokenizer 并放到该位置。
 
 显存紧张时可降低 `num_step`（如 16）、缩短参考音频（`MAX_REF_DURATION=15`）。
 
+### 5.1 CPU 模式部署（无显卡环境）
+
+服务可以在没有显卡的机器上运行，适用于**功能验证、接口联调**，但速度很慢，不建议用于生产。
+
+**无需修改代码**，服务已自动适配：
+
+- 设备自动检测：未检测到 GPU 时自动回退到 `cpu`
+- 精度自动转换：CPU 模式下会强制把 `float16` / `bfloat16` 转为 `float32`
+  （CPU 不支持半精度算子，否则推理会直接报错）
+
+推荐参数：
+
+| 参数 | GPU 建议值 | CPU 建议值 | 说明 |
+| --- | --- | --- | --- |
+| `DEVICE` | `cuda:0` | `cpu` | 指定使用 CPU |
+| `DTYPE` | `float16` | `float32` | 代码会自动转换，显式设置可避免启动警告 |
+| `DEFAULT_NUM_STEP` | `16`~`32` | `8`~`16` | 耗时与步数近似成正比，CPU 上尽量调低 |
+| `MAX_REF_DURATION` | `15`~`30` | `8`~`10` | 缩短参考音频，减少特征提取耗时 |
+| `LOAD_ASR` | `true` | `false` | Whisper 在 CPU 上极慢，且额外占用约 3 GB 内存 |
+
+启动命令（**不需要 `--gpus` 参数**）：
+
+```bash
+docker run -d --name omnivoice-cpu -p 8000:8000 \
+  -v /data/omnivoice/data:/opt/omnivoice-service/data \
+  -v /data/models:/opt/models \
+  -e MODEL_ID=/opt/models/OmniVoice \
+  -e DEVICE=cpu \
+  -e DTYPE=float32 \
+  -e DEFAULT_NUM_STEP=16 \
+  -e MAX_REF_DURATION=10 \
+  -e LOAD_ASR=false \
+  -e HF_HUB_OFFLINE=1 \
+  omnivoice-service:latest
+```
+
+注意事项：
+
+- **内存要求**：模型以 float32 加载约占 6 GB，建议机器内存 **≥ 16 GB**；开启 ASR 还需额外约 3 GB
+- **速度预期**：CPU 约为 T4 的 1/20 ~ 1/40。合成 23 秒音频，T4 约 8~15 秒，CPU 预计需要 **3~10 分钟**
+- **线程控制**：默认占用所有 CPU 核心，如需限制可加 `-e OMP_NUM_THREADS=8`
+- **关闭 ASR 后**：上传音色时需手动填写参考音频对应的文本（合成质量不受影响）
+
 ---
 
 ## 六、Web 页面使用
