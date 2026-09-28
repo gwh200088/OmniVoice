@@ -22,6 +22,10 @@ from .logging_setup import get_logger
 
 logger = get_logger(__name__)
 
+# 显存估算安全系数：并发时各请求的显存测量会互相干扰，估算值可能偏小。
+# 留出 20% 余量，宁可少放行一路，也比触发 OOM 导致整个服务崩溃要好。
+SAFETY_FACTOR = 1.2
+
 
 @dataclass
 class SlotLease:
@@ -190,7 +194,8 @@ class SlotManager:
         # 硬约束：可分配显存容量是否够一次推理（容量含进程缓存池空闲）
         capacity_mb = self.capacity_memory_mb()
         if capacity_mb is not None:
-            if (capacity_mb - self.reserve_mb) < self._estimate_mb:
+            needed_mb = self._estimate_mb * SAFETY_FACTOR
+            if (capacity_mb - self.reserve_mb) < needed_mb:
                 return False
 
         # 软约束：GPU 算力是否已饱和（显存够但利用率过高时不再放行，
@@ -231,17 +236,21 @@ class SlotManager:
 
     def _release(self, lease: SlotLease) -> None:
         """释放槽位，并根据本次实际占用修正显存估算。"""
+        used_mb = None
         if self.is_cuda and lease.capacity_before_mb is not None:
             # 用可分配容量的变化衡量本次占用：推理结束后张量虽已释放，
             # 但显存会留在缓存池中，容量因此下降，这正是一次推理的真实开销
             capacity_now = self.capacity_memory_mb()
             if capacity_now is not None:
-                used = lease.capacity_before_mb - capacity_now
-                if used > 0:
-                    self._update_estimate(used)
+                delta = lease.capacity_before_mb - capacity_now
+                if delta > 0:
+                    used_mb = delta
 
         with self._condition:
             self._active -= 1
+            # 估算更新放在锁内，避免并发释放时多个线程同时改写造成竞态
+            if used_mb is not None:
+                self._update_estimate(used_mb)
             self._condition.notify_all()
 
         logger.info(

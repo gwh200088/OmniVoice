@@ -82,6 +82,10 @@ def _error_response(exc: Exception) -> HTTPException:
         message = str(exc).strip("'\"")
         logger.warning("资源不存在：%s", message)
         return HTTPException(status_code=404, detail=f"资源不存在：{message}")
+    if isinstance(exc, TimeoutError):
+        # 等待推理槽位超时属于服务繁忙，用 503 更准确，便于调用方重试或降级
+        logger.warning("服务繁忙，等待推理槽位超时：%s", exc)
+        return HTTPException(status_code=503, detail=f"服务繁忙，请稍后重试：{exc}")
     if isinstance(exc, FileNotFoundError):
         return HTTPException(status_code=404, detail=f"文件不存在：{exc}")
     logger.exception("处理请求时发生未预期的错误：%s", exc)

@@ -301,10 +301,10 @@ def print_report(rounds: List[RoundResult], elapsed_total: float) -> None:
     print(f"压测总耗时：{elapsed_total:.1f} 秒")
     print()
     print("指标说明：")
-    print("  - QPS        ：每秒完成的请求数，串行推理时存在上限（≈ 1 / 单次合成耗时）")
+    print("  - QPS        ：每秒完成的请求数，受并发上限限制（≈ 并发上限 / 单次合成耗时）")
     print("  - 平均/P95   ：客户端观测到的响应耗时分布")
     print("  - 排队耗时   ：客户端耗时 - 服务端耗时，反映请求等待推理锁的时间")
-    print("  - 提高并发不会提升 QPS，只会增加排队时间（推理为加锁串行）")
+    print("  - 超过承载能力后继续加压不会提升 QPS，只会增加排队时间（见文档 9.1 并发模型）")
 
 
 def build_parser() -> argparse.ArgumentParser:
