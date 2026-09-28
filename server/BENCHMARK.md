@@ -31,18 +31,58 @@ docker build -f server/Dockerfile.quick -t omnivoice-service:quick .
 docker tag omnivoice-service:quick omnivoice-service:latest
 ```
 
-### 2.2 准备压测环境
+### 2.2 压测脚本的运行位置
 
-压测脚本依赖 `httpx`，**建议在服务端同机运行**（避免网络延迟混入响应时间）：
+压测脚本是**纯 HTTP 客户端**，在任何能访问服务的机器上都能运行，**但强烈推荐在部署服务的服务器本机运行**。
+
+| 运行位置 | 网络延迟 | 适用情况 |
+| --- | --- | --- |
+| **服务端本机**（推荐） | ~0.1 ms，可忽略 | 测响应时间、QPS、并发拐点，数据最准 |
+| 同局域网其他机器 | 0.5~2 ms | 可用，数据仍较准 |
+| 跨机房 / 远程办公网 | 10 ms 以上，甚至上百 ms | 只能看连通性与大致量级，**延迟数据不可用** |
+
+原因：响应时间 = 网络往返 + 服务端处理 + 排队。远程压测时网络延迟会混入，
+导致测出的延迟偏大，尤其 GPU 场景（单条仅 1~2 秒）时偏差更明显。
+
+> **注意**：不要在服务容器内部跑压测——会与被测服务争抢 CPU，反而使结果失真。
+> 应在服务器**宿主机**上运行脚本。
+
+### 2.3 依赖要求
+
+压测脚本**只需要 Python 与 httpx**，不需要 torch、不需要 omnivoice，
+也不依赖本项目的其他组件。
+
+| 项目 | 要求 |
+| --- | --- |
+| Python | 3.8 及以上（服务器通常自带 3.6+，请先确认） |
+| 第三方包 | 仅 `httpx`（及其自动依赖） |
+
+联网环境安装：
 
 ```bash
 pip install httpx
-
-# 把脚本放到服务器，例如
-mkdir -p /opt/bench && cp server/tools/benchmark.py /opt/bench/
 ```
 
-同时准备一段 3~10 秒的参考音频（如 `ref.wav`），用于创建测试音色。
+**内网环境（无外网）离线安装**：在能联网的机器上下载后拷贝到服务器：
+
+```bash
+# 有网的机器：下载 httpx 及其全部依赖到目录
+pip download httpx -d ./httpx_pkg
+
+# 拷贝到服务器后离线安装
+pip install --no-index --find-links=./httpx_pkg httpx
+```
+
+### 2.4 放置脚本与测试音频
+
+```bash
+# 把脚本与参考音频放到服务器
+mkdir -p /opt/bench
+cp server/tools/benchmark.py /opt/bench/
+cp ref.wav /opt/bench/
+```
+
+参考音频建议 3~10 秒、清晰人声，用于创建测试音色。
 
 ---
 
