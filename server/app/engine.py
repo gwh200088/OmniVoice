@@ -15,6 +15,7 @@ import torch
 
 from .config import Settings, get_settings
 from .logging_setup import get_logger
+from .slot import SlotManager
 
 logger = get_logger(__name__)
 
@@ -78,8 +79,14 @@ class InferenceEngine:
         self.device = ""
         self.dtype = None
         self.sampling_rate = int(self.settings.target_sample_rate)
-        self._lock = threading.Lock()      # 模型加载锁
-        self._infer_lock = threading.Lock()  # 推理串行锁
+        self._lock = threading.Lock()  # 模型加载锁
+        # 推理并发控制：显存充足即放行，不足则排队等待
+        self._slots = SlotManager(
+            max_concurrency=max(1, int(self.settings.max_concurrency or 2)),
+            slot_memory_mb=self.settings.gpu_slot_memory_mb,
+            reserve_mb=self.settings.gpu_reserve_mb,
+            wait_timeout=self.settings.slot_wait_timeout,
+        )
         self._load_time_ms: float = 0.0
 
     # ------------------------------------------------------------------
@@ -106,6 +113,12 @@ class InferenceEngine:
 
             self.device = resolve_device(self.settings.device)
             self.dtype = resolve_dtype(self.settings.dtype, self.device)
+
+            # 确定设备后设置槽位的并发上限：GPU 默认 2，CPU 默认 1
+            self._slots.device = self.device
+            if self.settings.max_concurrency <= 0:
+                self._slots.max_concurrency = 2 if self.device.startswith("cuda") else 1
+                logger.info("推理并发上限自动设置为 %d", self._slots.max_concurrency)
 
             logger.info(
                 "开始加载模型：模型=%s，设备=%s，精度=%s",
@@ -238,14 +251,16 @@ class InferenceEngine:
         """
         self.ensure_loaded()
 
-        stage = (
-            timer.stage("声纹特征提取")
-            if timer is not None
-            else _null_context()
-        )
         started = time.perf_counter()
-        with stage:
-            with self._infer_lock:
+        with self._slots.slot() as lease:
+            if timer is not None and lease.wait_ms >= 1.0:
+                timer.record("等待推理槽位", lease.wait_ms)
+            stage = (
+                timer.stage("声纹特征提取")
+                if timer is not None
+                else _null_context()
+            )
+            with stage:
                 text = (ref_text or "").strip() or None
                 source = "用户填写" if text else "ASR 自动识别"
                 prompt = self.model.create_voice_clone_prompt(
@@ -321,10 +336,12 @@ class InferenceEngine:
         if speed and float(speed) != 1.0:
             kwargs["speed"] = float(speed)
 
-        stage = timer.stage("语音合成") if timer is not None else _null_context()
         started = time.perf_counter()
-        with stage:
-            with self._infer_lock:
+        with self._slots.slot() as lease:
+            if timer is not None and lease.wait_ms >= 1.0:
+                timer.record("等待推理槽位", lease.wait_ms)
+            stage = timer.stage("语音合成") if timer is not None else _null_context()
+            with stage:
                 audios = self.model.generate(**kwargs)
         elapsed = (time.perf_counter() - started) * 1000.0
         waveform = np.asarray(audios[0], dtype=np.float32)
@@ -356,6 +373,7 @@ class InferenceEngine:
             "计算精度": str(self.dtype) if self.dtype else "未加载",
             "采样率": self.sampling_rate,
             "模型加载耗时毫秒": round(self._load_time_ms, 1),
+            "并发槽位": self._slots.stats(),
         }
 
 

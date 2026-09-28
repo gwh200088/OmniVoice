@@ -97,6 +97,12 @@ class Settings:
     # ---------------- 特征缓存 ----------------
     feature_cache_size: int = 64
 
+    # ---------------- 推理并发（按显存自适应）----------------
+    max_concurrency: int = 0        # 0 = 自动（GPU 2 / CPU 1）
+    gpu_slot_memory_mb: float = 0.0  # 0 = 自适应学习
+    gpu_reserve_mb: float = 512.0
+    slot_wait_timeout: float = 300.0
+
     # ---------------- 日志 ----------------
     log_level: str = "INFO"
     log_to_file: bool = True
@@ -147,6 +153,7 @@ class Settings:
             f"模型加载模式={'离线（禁止联网）' if self.hf_hub_offline else '允许联网'}；"
             f"数据目录={self.data_dir}；"
             f"特征缓存条数={self.feature_cache_size}；"
+            f"推理并发上限={self.max_concurrency or '自动'}；"
             f"默认扩散步数={self.default_num_step}；"
             f"默认引导系数={self.default_guidance_scale}；"
             f"日志级别={self.log_level}"
@@ -188,6 +195,11 @@ def load_settings() -> Settings:
         ),
         # 缓存
         feature_cache_size=env_int("FEATURE_CACHE_SIZE", 64),
+        # 推理并发
+        max_concurrency=env_int("MAX_CONCURRENCY", 0),
+        gpu_slot_memory_mb=env_float("GPU_SLOT_MEMORY_MB", 0.0),
+        gpu_reserve_mb=env_float("GPU_RESERVE_MB", 512.0),
+        slot_wait_timeout=env_float("SLOT_WAIT_TIMEOUT", 300.0),
         # 日志
         log_level=env_str("LOG_LEVEL", "INFO").upper(),
         log_to_file=env_bool("LOG_TO_FILE", True),
