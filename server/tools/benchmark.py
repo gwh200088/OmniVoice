@@ -132,6 +132,64 @@ def _percentile(data: List[float], p: float) -> float:
     return round(value, 1)
 
 
+def resolve_output_path(raw: str) -> Path:
+    """确定结果文件保存路径。
+
+    - 传入已存在的目录：在该目录下生成带时间戳的文件名，便于多次压测对比
+    - 传入文件路径：直接使用（父目录不存在时自动创建）
+    """
+    path = Path(raw)
+    if path.is_dir():
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        return path / f"benchmark_{stamp}.json"
+    if path.parent and not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def build_payload(
+    rounds: List[RoundResult],
+    bench: "Benchmark",
+    args: argparse.Namespace,
+    elapsed_total: float,
+) -> dict:
+    """组装 JSON 结果：既含汇总，也含每次请求的原始数据，便于生成统计图表。"""
+    return {
+        "压测配置": {
+            "服务地址": bench.base_url,
+            "压测模式": "复用已保存音色" if args.mode == "reuse" else "临时上传音频",
+            "文本长度": len(args.text),
+            "每轮请求数": args.requests,
+            "并发梯度": list(args.concurrency),
+            "单请求超时(秒)": args.timeout,
+            "音色ID": bench.voice_id if args.mode == "reuse" else "-",
+            "开始时间": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "汇总": [item.summary() for item in rounds],
+        "原始数据": [
+            {
+                "并发数": item.concurrency,
+                "请求明细": [
+                    {
+                        "序号": index + 1,
+                        "成功": one.success,
+                        "客户端耗时(ms)": round(one.client_ms, 1),
+                        "服务端耗时(ms)": round(one.server_ms, 1),
+                        "排队耗时(ms)": round(
+                            max(0.0, one.client_ms - one.server_ms), 1
+                        ),
+                        "状态码": one.status_code,
+                        "错误": one.error,
+                    }
+                    for index, one in enumerate(item.results)
+                ],
+            }
+            for item in rounds
+        ],
+        "压测总耗时(秒)": round(elapsed_total, 1),
+    }
+
+
 def _fmt_errors(results: List[RequestResult], limit: int = 3) -> str:
     """汇总失败原因。"""
     errors: dict = {}
@@ -329,7 +387,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--requests", type=int, default=20, help="每轮请求总数")
     parser.add_argument("--timeout", type=float, default=600.0, help="单请求超时（秒）")
     parser.add_argument("--warmup", type=int, default=1, help="预热请求数（不计入统计）")
-    parser.add_argument("--output", default="", help="结果保存为 JSON 文件")
+    parser.add_argument(
+        "--output",
+        default="",
+        help="结果保存路径（JSON）。传目录则在目录下生成带时间戳的文件名，"
+             "便于多次压测结果对比；建议指向挂载到宿主机的目录",
+    )
     return parser
 
 
@@ -397,20 +460,12 @@ async def async_main(args: argparse.Namespace) -> int:
     print_report(rounds, elapsed_total)
 
     if args.output:
-        payload = {
-            "压测配置": {
-                "服务地址": bench.base_url,
-                "模式": args.mode,
-                "文本长度": len(args.text),
-                "每轮请求数": args.requests,
-            },
-            "各轮结果": [item.summary() for item in rounds],
-            "压测总耗时(秒)": round(elapsed_total, 1),
-        }
-        Path(args.output).write_text(
+        path = resolve_output_path(args.output)
+        payload = build_payload(rounds, bench, args, elapsed_total)
+        path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        print(f"结果已保存到：{args.output}")
+        print(f"结果已保存到：{path}")
 
     return 0
 

@@ -5,3 +5,7 @@ python-multipart>=0.0.9
 # 限定 4.x / 5.x：Web 页面使用的 mount_gradio_app、Audio(type="filepath") 等
 # 接口在该范围内稳定，避免后续大版本变更导致页面不可用
 gradio>=4.0.0,<6.0
+# GPU 利用率采集：安装后 /api/v1/info 会返回 GPU 利用率，
+# 且 GPU_UTILIZATION_LIMIT（并发槽位的利用率约束）才生效。
+# 纯 Python 包，体积很小；若内网无法下载，可临时注释掉本行，不影响其他功能。
+nvidia-ml-py

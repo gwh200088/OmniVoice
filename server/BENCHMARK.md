@@ -295,7 +295,140 @@ docker stats omnivoice
 
 ---
 
-## 7. 根据结果调优
+## 7. 结果存储与图表生成
+
+### 7.1 保存结果文件
+
+`--output` 有两种写法：
+
+```bash
+# 指定文件：直接写入
+--output /opt/bench/result.json
+
+# 指定目录：自动生成带时间戳的文件名，多次压测结果不会互相覆盖，便于对比
+--output /opt/bench/results/
+# 实际生成：/opt/bench/results/benchmark_20260928_211612.json
+```
+
+### 7.2 在容器内压测时把结果落到宿主机
+
+容器内写的文件默认只在容器里，需通过挂载让结果出现在宿主机：
+
+```bash
+# 启动服务时挂载一个结果目录
+docker run -d --name omnivoice ... -v /data/bench:/opt/bench ...
+
+# 压测结果写入挂载目录，宿主机 /data/bench 下即可看到
+docker exec omnivoice python3 /opt/bench/benchmark.py \
+  --url http://127.0.0.1:8000 --voice-id <音色ID> \
+  --concurrency 1 2 4 --requests 20 \
+  --output /opt/bench/results/
+```
+
+若服务已启动且未挂载目录，可用 `docker cp` 拷出：
+
+```bash
+docker cp omnivoice:/opt/bench/results/benchmark_20260928_211612.json ./result.json
+```
+
+### 7.3 JSON 结构
+
+```json
+{
+  "压测配置": {
+    "服务地址": "http://127.0.0.1:8000",
+    "压测模式": "复用已保存音色",
+    "文本长度": 30,
+    "每轮请求数": 20,
+    "并发梯度": [1, 2, 4],
+    "单请求超时(秒)": 600,
+    "音色ID": "voice_xxx",
+    "开始时间": "2026-09-28 21:16:12"
+  },
+  "汇总": [
+    {
+      "并发数": 2, "请求总数": 20, "成功数": 20, "失败数": 0, "成功率(%)": 100.0,
+      "QPS": 0.981, "客户端平均耗时(ms)": 2035.4,
+      "客户端P50(ms)": 1980.1, "客户端P95(ms)": 2350.1, "客户端P99(ms)": 2500.0,
+      "客户端最大(ms)": 2600.2, "服务端平均耗时(ms)": 1900.0,
+      "服务端P95(ms)": 2100.0, "排队平均耗时(ms)": 120.3, "排队最大耗时(ms)": 300.5
+    }
+  ],
+  "原始数据": [
+    {
+      "并发数": 2,
+      "请求明细": [
+        {
+          "序号": 1, "成功": true,
+          "客户端耗时(ms)": 2100.5, "服务端耗时(ms)": 1980.2,
+          "排队耗时(ms)": 120.3, "状态码": 200, "错误": ""
+        }
+      ]
+    }
+  ],
+  "压测总耗时(秒)": 123.4
+}
+```
+
+- `汇总`：每轮一个条目的统计值，适合画**柱状对比图**
+- `原始数据`：每一次请求的耗时明细，适合画**散点图、直方图、时间序列图**
+
+### 7.4 生成图表（Python + matplotlib）
+
+```python
+import json
+import matplotlib.pyplot as plt
+
+data = json.load(open("benchmark_20260928_211612.json", encoding="utf-8"))
+summary = data["汇总"]
+
+# 图 1：各并发下的 QPS 对比
+plt.figure(figsize=(8, 4))
+plt.bar([r["并发数"] for r in summary], [r["QPS"] for r in summary], color="#4C78A8")
+plt.xlabel("并发数"); plt.ylabel("QPS"); plt.title("吞吐随并发变化")
+plt.savefig("qps.png", dpi=150, bbox_inches="tight")
+
+# 图 2：响应时间（平均 / P95 / 最大）对比
+plt.figure(figsize=(8, 4))
+x = [r["并发数"] for r in summary]
+plt.plot(x, [r["客户端平均耗时(ms)"] for r in summary], "o-", label="平均")
+plt.plot(x, [r["客户端P95(ms)"] for r in summary], "s-", label="P95")
+plt.plot(x, [r["客户端最大(ms)"] for r in summary], "^-", label="最大")
+plt.xlabel("并发数"); plt.ylabel("耗时 (ms)"); plt.legend(); plt.title("响应时间随并发变化")
+plt.savefig("latency.png", dpi=150, bbox_inches="tight")
+
+# 图 3：排队耗时（判断承载拐点）
+plt.figure(figsize=(8, 4))
+plt.plot(x, [r["排队平均耗时(ms)"] for r in summary], "o-", color="#E45756")
+plt.xlabel("并发数"); plt.ylabel("排队耗时 (ms)"); plt.title("排队耗时随并发变化")
+plt.savefig("queue.png", dpi=150, bbox_inches="tight")
+```
+
+> 需要 `pip install matplotlib`。若不想装，也可用下节的 CSV 导出后交给 Excel。
+
+### 7.5 导出 CSV（Excel 分析）
+
+```python
+import csv
+import json
+
+data = json.load(open("benchmark_20260928_211612.json", encoding="utf-8"))
+with open("result.csv", "w", newline="", encoding="utf-8-sig") as f:
+    writer = csv.writer(f)
+    writer.writerow(["并发数", "序号", "成功", "客户端耗时(ms)", "服务端耗时(ms)", "排队耗时(ms)"])
+    for round_item in data["原始数据"]:
+        for item in round_item["请求明细"]:
+            writer.writerow([
+                round_item["并发数"], item["序号"], item["成功"],
+                item["客户端耗时(ms)"], item["服务端耗时(ms)"], item["排队耗时(ms)"],
+            ])
+```
+
+`utf-8-sig` 编码确保 Excel 打开中文表头不乱码。
+
+---
+
+## 8. 根据结果调优
 
 | 目标 | 调整项 |
 | --- | --- |
@@ -309,7 +442,7 @@ docker stats omnivoice
 
 ---
 
-## 8. 常见问题
+## 9. 常见问题
 
 **Q：首次压测时前几秒特别慢？**
 A：模型加载（CPU 上可能数分钟）未完成。用 `docker logs -f omnivoice` 确认加载完成后再压；压测脚本默认有 1 次预热，也可加大 `--timeout`。
