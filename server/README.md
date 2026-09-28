@@ -67,6 +67,31 @@ docker build -f server/Dockerfile -t omnivoice-service:latest \
 
 > 如需其他 CUDA 版本（例如驱动较老的机器），可通过 `--build-arg CUDA_IMAGE=12.4.1-cudnn-runtime-ubuntu22.04` 指定。
 
+### 1.1 增量构建（只更新代码，不重装依赖）
+
+完整构建需要下载 PyTorch 等大体积依赖（数十分钟）。**后续只改了服务代码或运行参数时，
+可用增量方式基于已有镜像重建，通常几十秒内完成**：
+
+```bash
+# 基于本地已有的 omnivoice-service:latest 构建
+docker build -f server/Dockerfile.quick -t omnivoice-service:quick .
+
+# 确认无误后替换正式标签
+docker tag omnivoice-service:quick omnivoice-service:latest
+```
+
+适用与不适用的场景：
+
+| 场景 | 用哪个文件 |
+| --- | --- |
+| 只改了服务代码（`server/app/*`）、文档、运行参数 | `Dockerfile.quick`（快） |
+| `requirements.txt` 新增了依赖 | `Dockerfile.quick`（只装新增部分） |
+| 首次构建、换 CUDA/torch 版本、改系统依赖 | `Dockerfile`（完整构建） |
+
+> 说明：主 `Dockerfile` 已按"稳定层在前、易变层在后"排列——系统依赖与 PyTorch 在前，
+> 服务代码居中，运行参数 `ENV` 放在最后。因此调整运行参数时，
+> 即使走完整构建流程，也只重建最后几层，不会重新下载依赖。
+
 ## 二、启动容器
 
 ### Docker 19.03 及以上（推荐）

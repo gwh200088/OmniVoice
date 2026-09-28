@@ -9,16 +9,20 @@
 #       --build-arg USE_CN_MIRROR=true \
 #       --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple .
 #
+# 只更新代码、不想重装依赖（基于已有镜像，几十秒完成）：
+#     docker build -f server/Dockerfile.quick -t omnivoice-service:quick .
+#
 # 兼容性说明：
 #   - 本文件不使用任何 BuildKit 专有语法（如 --mount、heredoc、COPY --chmod），
 #     Docker 18.09 及以上版本均可正常构建；
 #   - 未安装 flash-attn：T4（Turing sm_75）不支持该算子，统一走 SDPA 注意力，
 #     保证 T4 / A10 / A100 等多种显卡环境通用。
+#
+# 分层说明（关系到构建速度，修改时请保持此顺序）：
+#   1) 系统依赖 → 2) PyTorch（体积最大）→ 3) OmniVoice 本体 → 4) 服务代码
+#   → 5) 运行参数 ENV → 6) 容器配置
+#   越靠前的层越稳定、越耗时；运行参数放在最后，调整时不会触发依赖重装。
 # ---------------------------------------------------------------------------
-# 基础镜像，可通过 --build-arg CUDA_IMAGE=... 切换
-# 说明：PyTorch 的 pip 包自带 cuDNN 与 CUDA 运行库，因此使用 runtime 版本即可，
-# 无需 cudnn 版本；容器内 CUDA 版本无需与 torch 的 CUDA 版本严格一致，
-# 真正决定能否运行的是宿主机显卡驱动所支持的最高 CUDA 版本。
 ARG CUDA_IMAGE=12.4.1-runtime-ubuntu22.04
 FROM nvidia/cuda:${CUDA_IMAGE}
 
@@ -29,46 +33,8 @@ ARG APT_MIRROR=https://mirrors.aliyun.com/ubuntu/
 # pip 源地址，留空则使用官方源
 ARG PIP_INDEX_URL=
 
-# 模型缓存目录（建议挂载到宿主机，避免重复下载）
-ENV HF_HOME=/opt/models/huggingface
-ENV HF_HUB_CACHE=/opt/models/huggingface
-ENV TRANSFORMERS_CACHE=/opt/models/huggingface
-ENV TORCH_HOME=/opt/models/torch
-
-# 服务运行参数（均可通过 docker run -e 覆盖）
-ENV DATA_DIR=/opt/omnivoice-service/data
-ENV HOST=0.0.0.0
-ENV PORT=8000
-ENV UI_PATH=/ui
-ENV API_PREFIX=/api/v1
-ENV MODEL_ID=k2-fsa/OmniVoice
-ENV DEVICE=
-ENV DTYPE=float16
-ENV ATTN_IMPLEMENTATION=
-ENV PRELOAD_MODEL=true
-ENV LOAD_ASR=true
-ENV ASR_MODEL=openai/whisper-large-v3-turbo
-ENV ASR_DEVICE=
-ENV HF_ENDPOINT=
-ENV HF_HUB_OFFLINE=0
-ENV LOG_LEVEL=INFO
-ENV LOG_TO_FILE=true
-ENV DEFAULT_NUM_STEP=32
-ENV DEFAULT_GUIDANCE_SCALE=2.0
-ENV MAX_UPLOAD_MB=50
-ENV MAX_REF_DURATION=30
-ENV FEATURE_CACHE_SIZE=64
-ENV MAX_CONCURRENCY=0
-ENV GPU_SLOT_MEMORY_MB=0
-ENV GPU_RESERVE_MB=512
-ENV GPU_UTILIZATION_LIMIT=0
-ENV SLOT_WAIT_TIMEOUT=300
-ENV ENABLE_WEBUI=true
-ENV SAVE_OUTPUT=true
-ENV GRADIO_ANALYTICS_ENABLED=false
-ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-# Python 相关
+# 构建期环境变量（仅影响安装过程，勿将运行参数放在此处，
+# 否则改动会导致后面所有依赖层缓存失效、重新下载）
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -114,7 +80,7 @@ RUN python3 -m pip config set global.retries 10 \
        fi
 
 # ---------------------------------------------------------------------------
-# PyTorch
+# PyTorch（体积最大，尽量保持此层不变以获得缓存命中）
 # TORCH_CUDA 需与宿主机驱动支持的 CUDA 版本匹配（torch 2.8.0 提供 cu126/cu128/cu129）：
 #   驱动较新（支持 12.8 及以上）→ 保持默认 cu128
 #   驱动较老（仅支持 12.6）      → --build-arg TORCH_CUDA=cu126
@@ -134,13 +100,56 @@ COPY omnivoice /opt/OmniVoice/omnivoice/
 RUN cd /opt/OmniVoice && python3 -m pip install .
 
 # ---------------------------------------------------------------------------
-# 安装服务依赖并部署服务代码
+# 部署服务代码与依赖
 # ---------------------------------------------------------------------------
 COPY server /opt/omnivoice-service
 WORKDIR /opt/omnivoice-service
 RUN python3 -m pip install -r requirements.txt
 
-# 数据、日志、模型缓存统一放在可挂载目录中，保证容器重启后不丢失
+# ---------------------------------------------------------------------------
+# 服务运行参数
+# 放在所有依赖之后：调整这些值不会触发 apt / pip 重装，构建可秒级完成。
+# 运行时也可通过 docker run -e 覆盖。
+# ---------------------------------------------------------------------------
+ENV HF_HOME=/opt/models/huggingface
+ENV HF_HUB_CACHE=/opt/models/huggingface
+ENV TRANSFORMERS_CACHE=/opt/models/huggingface
+ENV TORCH_HOME=/opt/models/torch
+ENV DATA_DIR=/opt/omnivoice-service/data
+ENV HOST=0.0.0.0
+ENV PORT=8000
+ENV UI_PATH=/ui
+ENV API_PREFIX=/api/v1
+ENV MODEL_ID=k2-fsa/OmniVoice
+ENV DEVICE=
+ENV DTYPE=float16
+ENV ATTN_IMPLEMENTATION=
+ENV PRELOAD_MODEL=true
+ENV LOAD_ASR=true
+ENV ASR_MODEL=openai/whisper-large-v3-turbo
+ENV ASR_DEVICE=
+ENV HF_ENDPOINT=
+ENV HF_HUB_OFFLINE=0
+ENV LOG_LEVEL=INFO
+ENV LOG_TO_FILE=true
+ENV DEFAULT_NUM_STEP=32
+ENV DEFAULT_GUIDANCE_SCALE=2.0
+ENV MAX_UPLOAD_MB=50
+ENV MAX_REF_DURATION=30
+ENV FEATURE_CACHE_SIZE=64
+ENV MAX_CONCURRENCY=0
+ENV GPU_SLOT_MEMORY_MB=0
+ENV GPU_RESERVE_MB=512
+ENV GPU_UTILIZATION_LIMIT=0
+ENV SLOT_WAIT_TIMEOUT=300
+ENV ENABLE_WEBUI=true
+ENV SAVE_OUTPUT=true
+ENV GRADIO_ANALYTICS_ENABLED=false
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# ---------------------------------------------------------------------------
+# 容器配置
+# ---------------------------------------------------------------------------
 VOLUME ["/opt/omnivoice-service/data", "/opt/models"]
 
 EXPOSE 8000

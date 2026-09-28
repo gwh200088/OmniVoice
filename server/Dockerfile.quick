@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------------------
+# 增量构建：基于已构建好的 omnivoice-service:latest，只更新代码与运行参数
+#
+# 适用场景：已经完整构建过一次镜像，后续只改了服务代码或运行参数，
+#          不想重新下载 torch 等大体积依赖时使用。构建通常在几十秒内完成。
+#
+# 用法（在仓库根目录执行）：
+#     docker build -f server/Dockerfile.quick -t omnivoice-service:quick .
+#
+# 确认无误后再替换正式标签：
+#     docker tag omnivoice-service:quick omnivoice-service:latest
+#
+# 注意：如果 requirements.txt 新增了依赖，本文件会自动补装（体积小）；
+#      若需要更换 CUDA / torch 版本，请改用 server/Dockerfile 完整构建。
+# ---------------------------------------------------------------------------
+FROM omnivoice-service:latest
+
+# ---------------------------------------------------------------------------
+# 服务运行参数（与 Dockerfile 保持一致，可按需要修改）
+# 这些放在 COPY 之前，便于单独调整而不影响依赖层
+# ---------------------------------------------------------------------------
+ENV HOST=0.0.0.0
+ENV PORT=8000
+ENV UI_PATH=/ui
+ENV API_PREFIX=/api/v1
+ENV MODEL_ID=k2-fsa/OmniVoice
+ENV DEVICE=
+ENV DTYPE=float16
+ENV ATTN_IMPLEMENTATION=
+ENV PRELOAD_MODEL=true
+ENV LOAD_ASR=true
+ENV ASR_MODEL=openai/whisper-large-v3-turbo
+ENV ASR_DEVICE=
+ENV HF_ENDPOINT=
+ENV HF_HUB_OFFLINE=0
+ENV LOG_LEVEL=INFO
+ENV LOG_TO_FILE=true
+ENV DEFAULT_NUM_STEP=32
+ENV DEFAULT_GUIDANCE_SCALE=2.0
+ENV MAX_UPLOAD_MB=50
+ENV MAX_REF_DURATION=30
+ENV FEATURE_CACHE_SIZE=64
+ENV MAX_CONCURRENCY=0
+ENV GPU_SLOT_MEMORY_MB=0
+ENV GPU_RESERVE_MB=512
+ENV GPU_UTILIZATION_LIMIT=0
+ENV SLOT_WAIT_TIMEOUT=300
+ENV ENABLE_WEBUI=true
+ENV SAVE_OUTPUT=true
+ENV GRADIO_ANALYTICS_ENABLED=false
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# ---------------------------------------------------------------------------
+# 更新服务代码
+# ---------------------------------------------------------------------------
+COPY server /opt/omnivoice-service
+WORKDIR /opt/omnivoice-service
+
+# 依赖清单未变化时 pip 会直接跳过（已安装即满足），耗时可忽略；
+# 若确实新增了依赖（如 nvidia-ml-py），这里只装新增的部分
+RUN python3 -m pip install -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# 启动脚本与容器配置
+# ---------------------------------------------------------------------------
+COPY server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+VOLUME ["/opt/omnivoice-service/data", "/opt/models"]
+EXPOSE 8000
+
+HEALTHCHECK --interval=60s --timeout=15s --start-period=300s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8000/api/v1/health || exit 1
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["python3", "-m", "app.main"]
