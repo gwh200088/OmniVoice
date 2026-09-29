@@ -84,32 +84,144 @@ cp ref.wav /opt/bench/
 
 参考音频建议 3~10 秒、清晰人声，用于创建测试音色。
 
-### 2.5 服务器没有 Python 环境时：在容器内压测
+### 2.5 容器内压测详细步骤（服务器无 Python 环境）
 
 **镜像内已自带 Python 3.10 与 httpx**（随服务依赖安装），
-因此即使服务器宿主机没有 Python，也可以直接在容器内运行压测脚本，无需任何安装。
+且**压测脚本已包含在镜像中**（`/opt/omnivoice-service/tools/benchmark.py`），
+因此即使服务器宿主机没有 Python，也可以直接进入容器压测，无需拷贝脚本、无需安装任何东西。
 
-**方式一：在服务容器内执行（最简单）**
+#### 2.5.1 先看清容器内的目录结构
 
-```bash
-# 把脚本与参考音频拷进运行中的容器
-docker exec omnivoice mkdir -p /opt/bench
-docker cp benchmark.py omnivoice:/opt/bench/
-docker cp ref.wav omnivoice:/opt/bench/
-
-# 创建测试音色
-docker exec omnivoice python3 /opt/bench/benchmark.py \
-  --url http://127.0.0.1:8000 \
-  --audio /opt/bench/ref.wav --auto-create --concurrency 1 --requests 3
-
-# 正式压测
-docker exec omnivoice python3 /opt/bench/benchmark.py \
-  --url http://127.0.0.1:8000 \
-  --voice-id <音色ID> \
-  --concurrency 1 2 4 --requests 20
+```
+/opt/omnivoice-service/          ← 服务主目录（容器默认工作目录，登录后就在这里）
+├── app/                         ← 服务代码（main.py / engine.py / slot.py 等）
+├── tools/
+│   └── benchmark.py             ← 压测脚本（镜像自带，无需拷贝）
+├── data/                        ← 数据目录（通常已挂载到宿主机）
+│   ├── voices/                  ← 音色与特征文件
+│   ├── outputs/                 ← 合成音频结果
+│   ├── logs/                    ← 服务日志
+│   └── tmp/                     ← 临时文件
+├── requirements.txt             ← 依赖清单
+├── README.md / API.md / BENCHMARK.md   ← 文档
+└── docker-entrypoint.sh         ← 启动脚本
 ```
 
-容器内访问本机服务直接用 `http://127.0.0.1:8000`。
+#### 2.5.2 第 1 步：进入容器
+
+```bash
+docker exec -it omnivoice /bin/bash
+```
+
+进入后默认就在 `/opt/omnivoice-service`（可用 `pwd` 确认）。
+
+#### 2.5.3 第 2 步：准备参考音频（在宿主机执行）
+
+镜像里没有音频文件，需要拷进去一份（3~10 秒清晰人声）：
+
+```bash
+docker cp ./ref.wav omnivoice:/opt/omnivoice-service/data/ref.wav
+```
+
+> 拷到 `data/` 目录的好处：该目录通常已挂载到宿主机，容器删除后文件仍在。
+
+#### 2.5.4 第 3 步：进入脚本目录并压测（在容器内执行）
+
+```bash
+cd /opt/omnivoice-service/tools
+```
+
+**① 先创建测试音色**（只需做一次）：
+
+```bash
+python3 benchmark.py \
+  --url http://127.0.0.1:8000 \
+  --audio /opt/omnivoice-service/data/ref.wav \
+  --auto-create \
+  --concurrency 1 --requests 3
+```
+
+输出中的 `音色 ID` 记下来，下一步要用。
+
+**② 单并发测基线**：
+
+```bash
+python3 benchmark.py \
+  --url http://127.0.0.1:8000 \
+  --voice-id voice_20260929_xxxxxx \
+  --concurrency 1 --requests 10
+```
+
+**③ 多档并发对比（核心）**，结果存到挂载目录：
+
+```bash
+python3 benchmark.py \
+  --url http://127.0.0.1:8000 \
+  --voice-id voice_20260929_xxxxxx \
+  --concurrency 1 2 4 8 \
+  --requests 20 \
+  --output /opt/omnivoice-service/data/bench/
+```
+
+CPU 模式请加 `--timeout 1800`（单次耗时可能达分钟级）。
+
+#### 2.5.5 结果文件在哪、叫什么
+
+- **不加 `--output`**：只在屏幕打印，不生成文件
+- **加 `--output` 传目录**：在目录下自动生成文件，命名格式为
+
+  ```
+  benchmark_<日期>_<时间>.json
+  例：benchmark_20260929_143052.json
+  ```
+
+  时间戳保证多次压测结果不会互相覆盖，便于对比
+- **加 `--output` 传文件路径**：直接写入该路径
+
+推荐传到 `/opt/omnivoice-service/data/bench/`（需先把 `data` 挂到宿主机），
+这样结果直接出现在宿主机上，不用再 `docker cp`。
+
+若服务已启动且 `data` 未挂载，可用 `docker cp` 拷出：
+
+```bash
+docker cp omnivoice:/opt/omnivoice-service/data/bench/benchmark_20260929_143052.json ./result.json
+```
+
+#### 2.5.6 不进入容器的等价写法
+
+不想 `docker exec -it` 交互式进入，可直接一条命令跑完：
+
+```bash
+docker exec omnivoice python3 /opt/omnivoice-service/tools/benchmark.py \
+  --url http://127.0.0.1:8000 \
+  --voice-id voice_20260929_xxxxxx \
+  --concurrency 1 2 4 --requests 20 \
+  --output /opt/omnivoice-service/data/bench/
+```
+
+#### 2.5.7 方式二：独立压测容器（数据更严谨）
+
+用一个临时容器专门跑压测，避免与被测服务争抢 CPU：
+
+```bash
+docker run --rm --network host \
+  -v /data/bench:/opt/bench \
+  --entrypoint python3 \
+  omnivoice-service:latest \
+  /opt/omnivoice-service/tools/benchmark.py \
+  --url http://127.0.0.1:8000 \
+  --voice-id <音色ID> \
+  --concurrency 1 2 4 --requests 20 \
+  --output /opt/bench/
+```
+
+- `--entrypoint python3`：覆盖启动脚本，不启动服务，只运行压测
+- `--network host`（Linux）：容器内 `127.0.0.1` 即宿主机
+- `--rm`：压测结束自动清理容器
+
+> Windows / macOS 的 Docker Desktop 不支持 `--network host`，
+> 请改用 `--add-host=host.docker.internal:host-gateway`，
+> 并把 `--url` 换成 `http://host.docker.internal:8000`。
 
 **方式二：启动独立压测容器（数据更严谨）**
 
@@ -469,16 +581,38 @@ A：降低 `MAX_CONCURRENCY`，或调大 `GPU_RESERVE_MB` 留出更多显存余�
 
 ## 附录：压测脚本常用参数速查
 
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `--url` | `http://127.0.0.1:8000` | 服务地址 |
-| `--voice-id` | 空 | 已保存音色 ID；为空时自动取列表第一个 |
-| `--audio` | 空 | 参考音频路径 |
-| `--auto-create` | 关闭 | 用 `--audio` 创建音色后再压测 |
-| `--mode` | `reuse` | `reuse` 复用音色 / `upload` 临时上传 |
-| `--text` | 内置文本 | 待合成文本，建议换成实际业务长度 |
-| `--concurrency` | `1 2 4` | 并发梯度，可多轮依次测试 |
-| `--requests` | `20` | 每轮请求总数 |
-| `--timeout` | `600` | 单请求超时（秒），CPU 模式请调大 |
-| `--warmup` | `1` | 预热次数，不计入统计 |
-| `--output` | 空 | 结果 JSON 保存路径 |
+| 参数 | 默认值 | 含义 | 示例 / 注意 |
+| --- | --- | --- | --- |
+| `--url` | `http://127.0.0.1:8000` | 服务访问地址 | 容器内压自己用 `http://127.0.0.1:8000`；独立容器加 `--network host` 后同样写 `127.0.0.1` |
+| `--api-prefix` | `/api/v1` | 接口前缀 | 需与服务的 `API_PREFIX` 一致，一般不用改 |
+| `--voice-id` | 空 | 已保存的音色 ID | 为空时自动取音色列表第一个；建议显式指定 |
+| `--audio` | 空 | 参考音频路径 | 填**容器内路径**，如 `/opt/omnivoice-service/data/ref.wav` |
+| `--auto-create` | 关闭 | 先用 `--audio` 创建音色，再压测 | 首次压测、还没有音色时加这个参数 |
+| `--mode` | `reuse` | `reuse`=复用已保存音色；`upload`=每次临时上传音频 | `reuse` 是生产主要路径；`upload` 用于测最坏情况 |
+| `--text` | 内置 30 字文本 | 待合成的文本 | 建议换成真实业务文本，如 `--text "您好，这里是智能客服……"` |
+| `--concurrency` | `1 2 4` | 并发梯度，空格分隔，依次测多轮 | `--concurrency 1 2 4 8` |
+| `--requests` | `20` | 每轮的请求总数 | 并发越大总耗时越长，可先设 10 试跑 |
+| `--timeout` | `600` | 单个请求的超时时间（秒） | CPU 模式建议 `--timeout 1800` |
+| `--warmup` | `1` | 预热次数，不计入统计 | 用于触发模型加载；设 `0` 可跳过 |
+| `--output` | 空 | 结果保存路径 | 传**目录**则自动生成 `benchmark_<日期>_<时间>.json`；传文件路径则直接写入。不传则只打印不保存 |
+| `-h` / `--help` | - | 查看帮助 | `python3 benchmark.py --help` |
+
+**常用组合示例**：
+
+```bash
+# 首次：创建音色（记住输出的音色 ID）
+python3 benchmark.py --url http://127.0.0.1:8000 \
+  --audio /opt/omnivoice-service/data/ref.wav --auto-create \
+  --concurrency 1 --requests 3
+
+# 正式压测：4 档并发，结果存到挂载目录
+python3 benchmark.py --url http://127.0.0.1:8000 \
+  --voice-id voice_20260929_ab12cd \
+  --concurrency 1 2 4 8 --requests 20 \
+  --output /opt/omnivoice-service/data/bench/
+
+# 临时上传模式（测最坏情况，每次重新提取特征）
+python3 benchmark.py --url http://127.0.0.1:8000 \
+  --mode upload --audio /opt/omnivoice-service/data/ref.wav \
+  --concurrency 1 2 --requests 10
+```
