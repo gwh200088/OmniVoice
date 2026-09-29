@@ -723,6 +723,22 @@ A：两种方式：
 A：降低 `BATCH_MAX_SIZE`（批量越大显存占用越高），或降低 `MAX_CONCURRENCY`、
 调大 `GPU_RESERVE_MB` 留出更多显存余量。
 
+**Q：怎么确认服务各模块之间接口是正常的？**
+A：运行契约检查脚本。它会**真实导入全部模块**并调用关键路径（批量推理、
+批量调度、业务编排、接口路由等），全部通过才返回退出码 0：
+
+```bash
+# 在容器内（依赖齐全）
+python3 tools/check_contract.py
+
+# 或用镜像直接跑
+docker run --rm --entrypoint python3 omnivoice-service:batch \
+  /opt/omnivoice-service/tools/check_contract.py
+```
+
+建议在改动代码或调整配置后跑一次。它可以提前发现「某模块引用了另一个模块
+并不存在的属性/方法」这类问题——这类问题语法检查查不出来，等请求进来才报错。
+
 ---
 
 ## 附录：压测脚本常用参数速查
