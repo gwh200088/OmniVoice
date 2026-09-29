@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from .batcher import get_scheduler
 from .config import Settings, get_settings
 from .logging_setup import get_logger
 from .schemas import ExtractRequest, TTSJsonRequest, VoiceUpdateRequest
@@ -149,6 +151,7 @@ def info() -> dict:
     return {
         "服务版本": "1.0.0",
         "引擎信息": service.engine.info(),
+        "批量推理": get_scheduler(service.engine).stats(),
         "存储统计": service.store.stats(),
         "上传限制": {
             "单个文件最大MB": service.settings.max_upload_mb,
@@ -306,23 +309,27 @@ async def tts(
     try:
         if file is not None:
             tmp_path = await _save_upload(file, service.settings)
-        result = service.synthesize(
-            text=text,
-            voice_id=voice_id or None,
-            upload_path=tmp_path,
-            upload_filename=file.filename if file is not None else "",
-            ref_text=ref_text,
-            language=language,
-            instruct=instruct,
-            duration=duration,
-            speed=speed,
-            num_step=num_step,
-            guidance_scale=guidance_scale,
-            denoise=denoise,
-            preprocess_prompt=preprocess_prompt,
-            postprocess_output=postprocess_output,
-            save_as_voice=save_as_voice,
-            voice_name=voice_name,
+        # 合成会阻塞（等待攒批 + GPU 推理），放到线程池执行，
+        # 避免占用事件循环导致其它请求进不来
+        result = await run_in_threadpool(
+            lambda: service.synthesize(
+                text=text,
+                voice_id=voice_id or None,
+                upload_path=tmp_path,
+                upload_filename=file.filename if file is not None else "",
+                ref_text=ref_text,
+                language=language,
+                instruct=instruct,
+                duration=duration,
+                speed=speed,
+                num_step=num_step,
+                guidance_scale=guidance_scale,
+                denoise=denoise,
+                preprocess_prompt=preprocess_prompt,
+                postprocess_output=postprocess_output,
+                save_as_voice=save_as_voice,
+                voice_name=voice_name,
+            )
         )
     except HTTPException:
         raise

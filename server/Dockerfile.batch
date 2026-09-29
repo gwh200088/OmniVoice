@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# 批量推理版镜像（基于已有的 omnivoice-service 镜像增量打包）
+#
+# 用途：只替换服务代码、不重装依赖，构建通常在几十秒内完成。
+#       适合已经打好基础镜像、只想更新代码的场景。
+#
+# 构建（在仓库根目录执行）：
+#     docker build -f server/Dockerfile.batch -t omnivoice-service:batch .
+#
+# 基于其它基础镜像：
+#     docker build -f server/Dockerfile.batch \
+#       --build-arg BASE_IMAGE=omnivoice-service:v1 \
+#       -t omnivoice-service:batch .
+#
+# 兼容性：与 server/Dockerfile 一致，不使用 BuildKit 专有语法（--mount、
+#         heredoc、COPY --chmod 等），Docker 18.09 及以上均可正常构建。
+#
+# 相对基础镜像的变化：
+#   1) 语音合成改为批量（batch）推理。GPU 的 kernel 在同一 CUDA stream 内
+#      串行执行，"开多个线程各跑一条"并不会并行加速（实测并发 5 相比并发 1
+#      QPS 几乎不变），把多条打包进一次前向才能真正利用显卡；
+#   2) MAX_CONCURRENCY 默认改为 1。批次由单个 worker 线程串行提交，
+#      再多线程只会和批次争抢显卡，反而变慢。
+# ---------------------------------------------------------------------------
+ARG BASE_IMAGE=omnivoice-service:latest
+FROM ${BASE_IMAGE}
+
+# 只覆盖服务代码层；torch / omnivoice 等依赖沿用基础镜像，不会被重装
+COPY server /opt/omnivoice-service
+
+# 批量推理运行参数（docker run -e 均可覆盖）
+ENV BATCH_ENABLED=true
+ENV BATCH_MAX_SIZE=4
+ENV BATCH_WAIT_MS=50
+# 批次由单 worker 串行提交，多线程只会争抢显卡，默认收窄为 1
+ENV MAX_CONCURRENCY=1
+
+WORKDIR /opt/omnivoice-service

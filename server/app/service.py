@@ -18,6 +18,7 @@ from .audio_utils import (
     save_wav,
     wav_bytes,
 )
+from .batcher import BatchItem, get_scheduler
 from .config import Settings, get_settings
 from .engine import InferenceEngine, get_engine
 from .logging_setup import get_logger
@@ -296,11 +297,11 @@ class VoiceCloneService:
                     timer=timer,
                 )
 
-            waveform = self.engine.synthesize(
+            waveform, batch_size = self._synthesize(
                 text=text,
                 prompt=prompt,
-                language=language or None,
-                instruct=instruct or None,
+                language=language,
+                instruct=instruct,
                 duration=duration,
                 speed=speed,
                 num_step=num_step,
@@ -332,6 +333,7 @@ class VoiceCloneService:
             "输出文件路径": output_path,
             "使用的音色ID": used_voice_id or "",
             "是否复用已保存特征": bool(voice_id),
+            "本批条数": batch_size,
             "阶段耗时": timer.stage_list(),
             "总耗时毫秒": round(timer.total_ms, 1),
         }
@@ -344,6 +346,58 @@ class VoiceCloneService:
             result["总耗时毫秒"],
         )
         return result
+
+    def _synthesize(
+        self,
+        text: str,
+        prompt,
+        language: Optional[str],
+        instruct: Optional[str],
+        duration,
+        speed,
+        num_step,
+        guidance_scale,
+        denoise: bool,
+        preprocess_prompt: bool,
+        postprocess_output: bool,
+        timer=None,
+    ):
+        """提交一次合成，返回 (波形, 本批条数)。
+
+        走批量调度器攒批后再推理：GPU 的 kernel 在同一 stream 内串行执行，
+        多线程各跑一条并不会带来并行加速，打包成 batch 才会。
+        调度器不可用时会自动降级为逐条推理。
+        """
+        scheduler = get_scheduler(self.engine)
+        item = BatchItem(
+            text=text,
+            prompt=prompt,
+            language=language or "",
+            instruct=instruct or "",
+            duration=float(duration or 0),
+            speed=float(speed or 0),
+            num_step=num_step,
+            guidance_scale=guidance_scale,
+            denoise=denoise,
+            preprocess_prompt=preprocess_prompt,
+            postprocess_output=postprocess_output,
+        )
+
+        if timer is not None:
+            with timer.stage("语音合成", note="含攒批等待"):
+                waveform = scheduler.submit(item)
+        else:
+            waveform = scheduler.submit(item)
+
+        batch_size = max(1, int(item.batch_size or 1))
+        if batch_size > 1:
+            logger.info(
+                "[%s] 本条与另外 %d 条合并为一批推理，等待攒批 %.1f 毫秒",
+                timer.request_id if timer is not None else "-",
+                batch_size - 1,
+                item.wait_ms,
+            )
+        return waveform, batch_size
 
     # ------------------------------------------------------------------
     # 内部工具

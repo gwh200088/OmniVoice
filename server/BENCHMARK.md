@@ -378,6 +378,7 @@ curl http://127.0.0.1:8000/api/v1/info
 | 字段 | 说明 |
 | --- | --- |
 | `最大并发数` | `MAX_CONCURRENCY` 是否生效（0 为自动：GPU 2 / CPU 1） |
+| `批量推理` | 批量调度状态：单批上限、已处理批次数、历史最大批量、平均批量 |
 | `单次推理显存估算(MB)` | 自适应学习到的值，或手动指定的值 |
 | `可分配显存容量(MB)` | 缓存池空闲 + 设备级剩余 |
 | `GPU利用率(%)` | 有数值说明 `pynvml` 可用；显示"不可用"表示未安装 |
@@ -653,8 +654,9 @@ with open("result.csv", "w", newline="", encoding="utf-8-sig") as f:
 
 | 目标 | 调整项 |
 | --- | --- |
+| **提升吞吐（最有效）** | `BATCH_ENABLED=true`（默认开启）+ 调大 `BATCH_MAX_SIZE`（T4 用 4，A10/A100 试 8） |
 | 降低单条耗时 | `DEFAULT_NUM_STEP`（32→16→8），QPS 同比提升 |
-| 提高吞吐上限 | `MAX_CONCURRENCY`（需显存有余量） |
+| 避免无效并发 | `MAX_CONCURRENCY=1`（多线程不加速，只会和批次抢显卡） |
 | 避免无效并发 | 安装 `nvidia-ml-py` 后设 `GPU_UTILIZATION_LIMIT=90` |
 | 减少首次特征提取开销 | `MAX_REF_DURATION=8`、上传时 `extract=true` 并复用音色 |
 | 提升整体吞吐 | 多容器 + 多显卡（`--gpus '"device=1"'`） |
@@ -683,8 +685,26 @@ time curl -X POST "http://127.0.0.1:8000/api/v1/tts" \
   -F "voice_id=<音色ID>" -o /dev/null
 ```
 
+**Q：并发从 1 提到 5，QPS 几乎没变，为什么？**
+A：这是正常现象，不是配置问题。GPU 的 kernel 在同一个 CUDA stream 内**串行执行**，
+开多个线程各跑一条并不会并行加速，只是让请求轮流使用显卡（实测 0.10 → 0.11）。
+
+提升吞吐要靠**批量推理**（服务默认已开启）：把多条合成打包进一次前向。
+请按下一步确认批量是否真的生效。
+
+**Q：怎么看批量是否生效？**
+A：两种方式：
+
+1. 查接口——`curl http://127.0.0.1:8000/api/v1/info` 的 `批量推理` 段，
+   关注 `平均批量` 与 `历史最大批量`：
+   - 接近 1：没攒起来（并发不够，或 `BATCH_WAIT_MS` 太短）
+   - 接近 `BATCH_MAX_SIZE`：攒批正常
+2. 看日志——会打印"本条与另外 N 条合并为一批推理"，
+   引擎侧同步打印"批量语音合成完成：本批 N 条"。
+
 **Q：并发压测时出现 OOM？**
-A：降低 `MAX_CONCURRENCY`，或调大 `GPU_RESERVE_MB` 留出更多显存余量。
+A：降低 `BATCH_MAX_SIZE`（批量越大显存占用越高），或降低 `MAX_CONCURRENCY`、
+调大 `GPU_RESERVE_MB` 留出更多显存余量。
 
 ---
 

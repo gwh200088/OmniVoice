@@ -115,6 +115,13 @@ class Settings:
     default_guidance_scale: float = 2.0
     save_output: bool = True
 
+    # ---------------- 批量推理 ----------------
+    # GPU 的 kernel 在同一 stream 内串行执行，多线程各跑一条并不能并行加速；
+    # 把多条合成打包成一次前向（batch）才能真正提升吞吐。
+    batch_enabled: bool = True
+    batch_max_size: int = 4
+    batch_wait_ms: float = 50.0
+
     def __post_init__(self) -> None:
         # 目录全部收敛到 data_dir 下，方便整体挂载到宿主机做持久化
         self.voices_dir = self.data_dir / "voices"
@@ -154,6 +161,7 @@ class Settings:
             f"模型加载模式={'离线（禁止联网）' if self.hf_hub_offline else '允许联网'}；"
             f"数据目录={self.data_dir}；"
             f"特征缓存条数={self.feature_cache_size}；"
+            f"批量推理={'开启，单批上限 ' + str(self.batch_max_size) + ' 条' if self.batch_enabled else '关闭'}；"
             f"推理并发上限={self.max_concurrency or '自动'}；"
             f"默认扩散步数={self.default_num_step}；"
             f"默认引导系数={self.default_guidance_scale}；"
@@ -211,6 +219,10 @@ def load_settings() -> Settings:
         default_num_step=env_int("DEFAULT_NUM_STEP", 32),
         default_guidance_scale=env_float("DEFAULT_GUIDANCE_SCALE", 2.0),
         save_output=env_bool("SAVE_OUTPUT", True),
+        # 批量推理
+        batch_enabled=env_bool("BATCH_ENABLED", True),
+        batch_max_size=env_int("BATCH_MAX_SIZE", 4),
+        batch_wait_ms=env_float("BATCH_WAIT_MS", 50.0),
     )
 
 

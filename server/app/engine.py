@@ -356,6 +356,128 @@ class InferenceEngine:
         )
         return waveform
 
+    def synthesize_batch(
+        self,
+        items,
+        num_step: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
+        denoise: bool = True,
+        preprocess_prompt: bool = True,
+        postprocess_output: bool = True,
+        timer=None,
+    ) -> list:
+        """一次前向同时合成多条（真正的 batch 推理）。
+
+        与逐条调用相比，batch 把多条样本放进同一次前向，GPU 才能真正并行
+        处理（多线程各跑一条时 kernel 在同一 stream 内仍是串行的）。
+
+        Args:
+            items: 若干请求对象，需具备 ``text`` / ``prompt`` / ``language``
+                / ``instruct`` / ``duration`` / ``speed`` 属性。
+            num_step: 扩散步数，**整批共用**（generation_config 的限制）。
+            guidance_scale: 引导系数，整批共用。
+
+        Returns:
+            与 items 等长的波形列表。
+        """
+        self.ensure_loaded()
+
+        from omnivoice import OmniVoiceGenerationConfig
+
+        config = OmniVoiceGenerationConfig(
+            num_step=int(num_step or self.settings.default_num_step),
+            guidance_scale=float(
+                guidance_scale
+                if guidance_scale is not None
+                else self.settings.default_guidance_scale
+            ),
+            denoise=bool(denoise),
+            preprocess_prompt=bool(preprocess_prompt),
+            postprocess_output=bool(postprocess_output),
+        )
+
+        # 槽位的显存门控是按"单条"估算的，而批量需要 N 倍显存。
+        # 这里先按可用显存推算本批最多能放几条，超出就拆分多次执行，
+        # 避免大批量绕过显存门控导致显存溢出。
+        limit = self._safe_batch_limit(len(items))
+        if limit < len(items):
+            logger.warning(
+                "可用显存不足以一次处理 %d 条，将拆分为每批 %d 条执行，避免显存溢出",
+                len(items),
+                limit,
+            )
+
+        waveforms: list = []
+        for start in range(0, len(items), limit):
+            waveforms.extend(
+                self._generate_batch(items[start : start + limit], config, timer)
+            )
+        return waveforms
+
+    def _safe_batch_limit(self, want: int) -> int:
+        """按当前可用显存推算本批最多能放几条。"""
+        if want <= 1:
+            return want
+        capacity_mb = self._slots.capacity_memory_mb()
+        if capacity_mb is None:
+            return want  # 查不到显存信息（如 CPU 模式）时不作限制
+        per_item_mb = self._slots.estimate_mb
+        if per_item_mb <= 0:
+            return want
+        usable_mb = capacity_mb - self._slots.reserve_mb
+        if usable_mb <= 0:
+            return 1
+        return max(1, min(int(want), int(usable_mb // per_item_mb)))
+
+    def _generate_batch(self, items, config, timer=None) -> list:
+        """执行一次批量前向（调用方需确保条数在显存安全范围内）。"""
+        # 音色、语种、声音描述、时长、语速都支持逐条指定
+        kwargs = {
+            "text": [item.text for item in items],
+            "voice_clone_prompt": [item.prompt for item in items],
+            "generation_config": config,
+        }
+
+        languages = [item.language or None for item in items]
+        if any(value is not None for value in languages):
+            kwargs["language"] = languages
+        instructs = [item.instruct or None for item in items]
+        if any(value is not None for value in instructs):
+            kwargs["instruct"] = instructs
+        durations = [
+            float(item.duration) if item.duration and float(item.duration) > 0 else None
+            for item in items
+        ]
+        if any(value is not None for value in durations):
+            kwargs["duration"] = durations
+        speeds = [
+            float(item.speed) if item.speed and float(item.speed) != 1.0 else None
+            for item in items
+        ]
+        if any(value is not None for value in speeds):
+            kwargs["speed"] = speeds
+
+        started = time.perf_counter()
+        with self._slots.slot() as lease:
+            if timer is not None and lease.wait_ms >= 1.0:
+                timer.record("等待推理槽位", lease.wait_ms)
+            stage = timer.stage("语音合成") if timer is not None else _null_context()
+            with stage:
+                audios = self.model.generate(**kwargs)
+        elapsed = (time.perf_counter() - started) * 1000.0
+
+        waveforms = [np.asarray(audio, dtype=np.float32) for audio in audios]
+        total_chars = sum(len(item.text or "") for item in items)
+        logger.info(
+            "批量语音合成完成：本批 %d 条，总耗时 %.1f 毫秒（均摊 %.1f 毫秒/条），"
+            "文本总长度=%d 字",
+            len(waveforms),
+            elapsed,
+            elapsed / max(1, len(waveforms)),
+            total_chars,
+        )
+        return waveforms
+
     # ------------------------------------------------------------------
     # 运行信息
     # ------------------------------------------------------------------

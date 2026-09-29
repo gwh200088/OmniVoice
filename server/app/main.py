@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api import router as api_router
+from .batcher import get_scheduler
 from .config import get_settings
 from .engine import get_engine
 from .logging_setup import configure_uvicorn_logs, get_logger, setup_logging
@@ -71,10 +72,20 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("已关闭模型预加载，首次请求时自动加载模型。")
 
+    # 模型就绪后启动批量调度器：把并发请求攒成一批，GPU 才能真正并行处理
+    try:
+        get_scheduler().start()
+    except Exception as exc:
+        logger.error("批量推理调度器启动失败，将退化为逐条合成。失败原因：%s", exc)
+
     logger.info("Web 页面地址：http://%s:%s%s", settings.host, settings.port, settings.ui_path)
     logger.info("接口文档地址：http://%s:%s/docs", settings.host, settings.port)
     logger.info("=" * 70)
     yield
+    try:
+        get_scheduler().stop()
+    except Exception:
+        pass
     logger.info("服务正在关闭，感谢使用。")
 
 
