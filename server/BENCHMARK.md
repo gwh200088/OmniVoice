@@ -159,7 +159,7 @@ python3 benchmark.py \
 python3 benchmark.py \
   --url http://127.0.0.1:8000 \
   --voice-id voice_20260929_xxxxxx \
-  --concurrency 1 2 4 8 \
+  --concurrency 1 4 8 16 \
   --requests 20 \
   --output /opt/bench/
 ```
@@ -172,7 +172,7 @@ CPU 模式请加 `--timeout 1800`（单次耗时可能达分钟级）。
 | --- | --- | --- | --- |
 | `--url` | `http://127.0.0.1:8000` | **服务在哪** | 告诉脚本去哪里发请求。在容器内压测时服务就在同一个容器里，所以用 `127.0.0.1`（本机回环）；`8000` 是服务端口，与启动时的 `-p 8000:8000` 一致。脚本会自动拼接成 `http://127.0.0.1:8000/api/v1/tts` 等接口地址 |
 | `--voice-id` | `voice_20260929_xxxxxx` | **用哪个音色合成** | 指定已保存的音色。压测会直接复用它已提取好的特征，**不再上传音频、不再重新提取**，因此测的就是生产主要路径。可换成你自己的 ID（用 `curl http://127.0.0.1:8000/api/v1/voices` 查询）；不传则自动取列表第一个 |
-| `--concurrency` | `1 2 4 8` | **并发梯度，跑 4 轮** | 空格分隔的多个值，脚本会**依次**跑 4 轮：同时发 1 个 → 2 个 → 4 个 → 8 个请求。这 4 轮结果会在最后汇总表里并排对比，用来找"排队耗时突然变长"的拐点。只写一个值就只跑一轮 |
+| `--concurrency` | `1 4 8 16` | **并发梯度，跑 4 轮** | 空格分隔的多个值，脚本会**依次**跑多轮：同时发 1 → 4 → 8 → 16 个请求，结果在汇总表里并排对比。启用批量推理后，并发的作用是**给服务端攒批"喂料"**（不再决定 GPU 并行度），所以档位要覆盖 `BATCH_MAX_SIZE` 的上下：并发 1 是无批量基线，4 刚好填满一批，8/16 用于确认批量上限是否成为新瓶颈 |
 | `--requests` | `20` | **每轮发多少个请求** | 每一轮总共发 20 次合成请求（不是总数）。本例 4 轮 × 20 = **共 80 次请求**。建议先设 10 试跑，确认单轮耗时可接受再加大 |
 | `--output` | `/opt/bench/` | **结果存到哪（容器内路径）** | 传的是**目录**而非文件，脚本会自动在其中生成 `benchmark_<日期>_<时间>.json`。它对应宿主机的哪个目录，取决于启动容器时的 `-v` 挂载，见 2.5.6 |
 
@@ -242,7 +242,7 @@ docker run -d --name omnivoice ... \
 
 ```bash
 python3 benchmark.py --url http://127.0.0.1:8000 \
-  --voice-id <音色ID> --concurrency 1 2 4 --requests 20 \
+  --voice-id <音色ID> --concurrency 1 4 8 16 --requests 20 \
   --output /opt/bench/
 ```
 
@@ -272,7 +272,7 @@ docker run -d --name omnivoice ... -v /data/bench:/opt/bench ...
 docker exec omnivoice python3 /opt/omnivoice-service/tools/benchmark.py \
   --url http://127.0.0.1:8000 \
   --voice-id voice_20260929_xxxxxx \
-  --concurrency 1 2 4 --requests 20 \
+  --concurrency 1 4 8 16 --requests 20 \
   --output /opt/omnivoice-service/data/bench/
 ```
 
@@ -288,7 +288,7 @@ docker run --rm --network host \
   /opt/omnivoice-service/tools/benchmark.py \
   --url http://127.0.0.1:8000 \
   --voice-id <音色ID> \
-  --concurrency 1 2 4 --requests 20 \
+  --concurrency 1 4 8 16 --requests 20 \
   --output /opt/bench/
 ```
 
@@ -310,7 +310,7 @@ docker run --rm --network host \
   --entrypoint python3 \
   omnivoice-service:latest \
   /bench/benchmark.py --url http://127.0.0.1:8000 \
-  --voice-id <音色ID> --concurrency 1 2 4 --requests 20
+  --voice-id <音色ID> --concurrency 1 4 8 16 --requests 20
 ```
 
 - `--entrypoint python3`：覆盖启动脚本，不启动服务，只运行压测
@@ -403,17 +403,32 @@ python benchmark.py --url http://127.0.0.1:8000 \
   --voice-id <音色ID> --concurrency 1 --requests 10
 ```
 
-得到单次合成的耗时基线，用于推算 QPS 上限：`QPS上限 ≈ 并发数 ÷ 单次耗时`。
+得到单次合成的耗时基线，用于推算 QPS 上限。注意启用批量推理后，决定吞吐的
+是**批量上限**而不是并发数：`QPS上限 ≈ BATCH_MAX_SIZE ÷ 单批耗时`
+（关闭批量时才是 `并发数 ÷ 单次耗时`）。
 
 ### 4.3 多档并发对比（核心）
 
 ```bash
 python benchmark.py --url http://127.0.0.1:8000 \
   --voice-id <音色ID> \
-  --concurrency 1 2 4 8 \
+  --concurrency 1 4 8 16 \
   --requests 20 \
   --output result.json
 ```
+
+**档位为什么取 1 / 4 / 8 / 16**：启用批量推理后，并发的作用变了——它不再决定
+GPU 的并行度（kernel 在同一 stream 内串行，加并发不会加速），而是**给服务端的
+攒批机制"喂料"**。
+
+| 档位 | 含义 | 预期结果 |
+| --- | --- | --- |
+| 1 | 无批量基线，走单条推理 | QPS 最低，作为对照组 |
+| 4 | 刚好填满一批（`BATCH_MAX_SIZE` 默认 4） | QPS 应明显提升 |
+| 8 / 16 | 超过批量上限，多余请求排队 | QPS 基本不再上涨 |
+
+若 4 → 8 时 QPS 仍在涨，说明批量上限还有空间，可把 `BATCH_MAX_SIZE`
+提到 6 或 8 再测（留意显存占用）。
 
 > CPU 模式单次耗时可能达分钟级，请调大超时：`--timeout 1800`。
 
@@ -545,7 +560,7 @@ docker run -d --name omnivoice ... -v /data/bench:/opt/bench ...
 # 压测结果写入挂载目录，宿主机 /data/bench 下即可看到
 docker exec omnivoice python3 /opt/bench/benchmark.py \
   --url http://127.0.0.1:8000 --voice-id <音色ID> \
-  --concurrency 1 2 4 --requests 20 \
+  --concurrency 1 4 8 16 --requests 20 \
   --output /opt/bench/results/
 ```
 
@@ -721,7 +736,7 @@ A：降低 `BATCH_MAX_SIZE`（批量越大显存占用越高），或降低 `MAX
 | `--auto-create` | 关闭 | 先用 `--audio` 创建音色，再压测 | 首次压测、还没有音色时加这个参数 |
 | `--mode` | `reuse` | `reuse`=复用已保存音色；`upload`=每次临时上传音频 | `reuse` 是生产主要路径；`upload` 用于测最坏情况 |
 | `--text` | 内置 30 字文本 | 待合成的文本 | 建议换成真实业务文本，如 `--text "您好，这里是智能客服……"` |
-| `--concurrency` | `1 2 4` | 并发梯度，空格分隔，依次测多轮 | `--concurrency 1 2 4 8` |
+| `--concurrency` | `1 4 8 16` | 并发梯度，空格分隔，依次测多轮；档位需覆盖批量上限的上下 | `--concurrency 1 4 8 16` |
 | `--requests` | `20` | 每轮的请求总数 | 并发越大总耗时越长，可先设 10 试跑 |
 | `--timeout` | `600` | 单个请求的超时时间（秒） | CPU 模式建议 `--timeout 1800` |
 | `--warmup` | `1` | 预热次数，不计入统计 | 用于触发模型加载；设 `0` 可跳过 |
@@ -739,7 +754,7 @@ python3 benchmark.py --url http://127.0.0.1:8000 \
 # 正式压测：4 档并发，结果存到挂载目录
 python3 benchmark.py --url http://127.0.0.1:8000 \
   --voice-id voice_20260929_ab12cd \
-  --concurrency 1 2 4 8 --requests 20 \
+  --concurrency 1 4 8 16 --requests 20 \
   --output /opt/omnivoice-service/data/bench/
 
 # 临时上传模式（测最坏情况，每次重新提取特征）
