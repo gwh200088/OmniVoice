@@ -424,6 +424,38 @@ python benchmark.py --url http://127.0.0.1:8000 \
 | 长文本（更贴近真实业务） | `--text "<实际业务文本>"` |
 | 压测已有的音色而不重新创建 | 只传 `--voice-id`，不加 `--auto-create` |
 
+### 4.5 压测生成的音频文件存在哪（重要）
+
+**压测脚本本身不保存音频**——它只统计耗时，收到的音频数据直接丢弃，唯一产物是 `--output` 指定的 JSON 统计文件。
+
+但**服务端默认会保存每次合成的音频**（`SAVE_OUTPUT` 默认为 `true`）：
+
+| 项目 | 路径 |
+| --- | --- |
+| 容器内 | `/opt/omnivoice-service/data/outputs/` |
+| 文件名 | `<日期>_<请求编号>.wav`，如 `20260929_tts-1a2b3c4d.wav` |
+| 宿主机 | 取决于 `data` 目录的挂载，例如 `/data/omnivoice/data/outputs/` |
+
+因此一次 80 条请求的压测会留下 80 个 wav（23 秒音频约 1.1 MB/条，合计约 90 MB），
+既占磁盘，写盘耗时也会计入总耗时。
+
+**建议做法**：
+
+```bash
+# 压测时关掉落盘，得到更纯粹的推理耗时（推荐）
+docker run -d ... -e SAVE_OUTPUT=false ...
+
+# 或压测后清理
+docker exec omnivoice sh -c "rm -f /opt/omnivoice-service/data/outputs/*.wav"
+
+# 查看数量与占用
+docker exec omnivoice sh -c "ls /opt/omnivoice-service/data/outputs/ | wc -l; \
+  du -sh /opt/omnivoice-service/data/outputs/"
+```
+
+若需要留几条试听效果，按上表的文件名格式挑选保留即可；
+也可用接口 `GET /api/v1/outputs` 列出、`GET /api/v1/outputs/{文件名}` 下载。
+
 ---
 
 ## 5. 压测时同步观察资源
