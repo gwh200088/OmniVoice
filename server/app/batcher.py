@@ -126,6 +126,18 @@ class BatchScheduler:
     def stop(self) -> None:
         """停止 worker 线程。"""
         self._stop.set()
+        # 唤醒仍在队列里等待的请求：否则它们要一直挂到超时才返回，
+        # 会把服务关闭过程拖住（默认超时是 300 秒）
+        pending: List[BatchItem] = []
+        while True:
+            try:
+                pending.append(self._queue.get_nowait())
+            except Empty:
+                break
+        for item in pending:
+            self._wake(item, error=RuntimeError("服务正在关闭，该请求未被执行"))
+        if pending:
+            logger.warning("服务关闭时有 %d 条请求未执行，已快速失败返回", len(pending))
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
