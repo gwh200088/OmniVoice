@@ -115,15 +115,15 @@ docker exec -it omnivoice /bin/bash
 
 进入后默认就在 `/opt/omnivoice-service`（可用 `pwd` 确认）。
 
-#### 2.5.3 第 2 步：准备参考音频（在宿主机执行）
+#### 2.5.3 第 2 步（可选）：只在还没有音色时才需要
 
-镜像里没有音频文件，需要拷进去一份（3~10 秒清晰人声）：
+> **如果已经有音色 ID，直接跳过本步和第 ① 步，从 ② 开始即可**——压测复用已保存的特征，不需要再上传音频。
+
+没有音色时，才需要拷一份参考音频进容器（3~10 秒清晰人声）：
 
 ```bash
 docker cp ./ref.wav omnivoice:/opt/omnivoice-service/data/ref.wav
 ```
-
-> 拷到 `data/` 目录的好处：该目录通常已挂载到宿主机，容器删除后文件仍在。
 
 #### 2.5.4 第 3 步：进入脚本目录并压测（在容器内执行）
 
@@ -131,7 +131,7 @@ docker cp ./ref.wav omnivoice:/opt/omnivoice-service/data/ref.wav
 cd /opt/omnivoice-service/tools
 ```
 
-**① 先创建测试音色**（只需做一次）：
+**① 创建测试音色**（**已有音色 ID 时跳过**，只需做一次）：
 
 ```bash
 python3 benchmark.py \
@@ -142,6 +142,7 @@ python3 benchmark.py \
 ```
 
 输出中的 `音色 ID` 记下来，下一步要用。
+（已有音色也可用 `curl http://127.0.0.1:8000/api/v1/voices` 查询。）
 
 **② 单并发测基线**：
 
@@ -160,10 +161,12 @@ python3 benchmark.py \
   --voice-id voice_20260929_xxxxxx \
   --concurrency 1 2 4 8 \
   --requests 20 \
-  --output /opt/omnivoice-service/data/bench/
+  --output /opt/bench/
 ```
 
 CPU 模式请加 `--timeout 1800`（单次耗时可能达分钟级）。
+
+> `--output /opt/bench/` 是**容器内路径**，对应的宿主机目录取决于启动容器时的挂载参数，见 2.5.5。
 
 #### 2.5.5 结果文件在哪、叫什么
 
@@ -178,16 +181,54 @@ CPU 模式请加 `--timeout 1800`（单次耗时可能达分钟级）。
   时间戳保证多次压测结果不会互相覆盖，便于对比
 - **加 `--output` 传文件路径**：直接写入该路径
 
-推荐传到 `/opt/omnivoice-service/data/bench/`（需先把 `data` 挂到宿主机），
-这样结果直接出现在宿主机上，不用再 `docker cp`。
+#### 2.5.6 结果目录：容器内路径 ↔ 宿主机路径（重要）
 
-若服务已启动且 `data` 未挂载，可用 `docker cp` 拷出：
+压测结果写在**容器内**，要能在宿主机看到，必须靠启动容器时的 `-v` 挂载。
+路径对应关系完全取决于你的挂载参数：
+
+| 启动时的挂载参数 | 容器内写这里 | 宿主机实际位置 |
+| --- | --- | --- |
+| `-v /data/omnivoice/data:/opt/omnivoice-service/data` | `/opt/omnivoice-service/data/bench/` | `/data/omnivoice/data/bench/` |
+| `-v /data/bench:/opt/bench` | `/opt/bench/` | `/data/bench/` |
+| 未挂载任何结果目录 | 任意容器路径 | 需用 `docker cp` 拷出 |
+
+**推荐做法**：启动容器时单独挂一个结果目录，路径清晰不与其他数据混在一起：
 
 ```bash
-docker cp omnivoice:/opt/omnivoice-service/data/bench/benchmark_20260929_143052.json ./result.json
+docker run -d --name omnivoice ... \
+  -v /data/omnivoice/data:/opt/omnivoice-service/data \
+  -v /data/models:/opt/models \
+  -v /data/bench:/opt/bench \          # ← 压测结果目录
+  ...
 ```
 
-#### 2.5.6 不进入容器的等价写法
+压测时用：
+
+```bash
+python3 benchmark.py --url http://127.0.0.1:8000 \
+  --voice-id <音色ID> --concurrency 1 2 4 --requests 20 \
+  --output /opt/bench/
+```
+
+结果就在宿主机的 `/data/bench/benchmark_<日期>_<时间>.json`，直接可取用。
+
+**若容器已经启动、没挂载结果目录**，两种补救办法：
+
+```bash
+# 办法 A：不挂载，压完再拷出来
+python3 benchmark.py ... --output /tmp/bench/          # 容器内执行
+docker cp omnivoice:/tmp/bench/benchmark_20260929_143052.json /data/bench/   # 宿主机执行
+```
+
+```bash
+# 办法 B：重启容器并补上挂载（数据目录已持久化，重启不影响音色与特征）
+docker stop omnivoice && docker rm omnivoice
+docker run -d --name omnivoice ... -v /data/bench:/opt/bench ...
+```
+
+> 注意：压测脚本会自动创建不存在的目录，无需提前 `mkdir`。
+
+#### 2.5.7 不进入容器的等价写法
 
 不想 `docker exec -it` 交互式进入，可直接一条命令跑完：
 
@@ -199,7 +240,7 @@ docker exec omnivoice python3 /opt/omnivoice-service/tools/benchmark.py \
   --output /opt/omnivoice-service/data/bench/
 ```
 
-#### 2.5.7 方式二：独立压测容器（数据更严谨）
+#### 2.5.8 方式二：独立压测容器（数据更严谨）
 
 用一个临时容器专门跑压测，避免与被测服务争抢 CPU：
 
