@@ -92,6 +92,14 @@ class SlotManager:
     def is_cuda(self) -> bool:
         return self.device.startswith("cuda")
 
+    @property
+    def estimate_mb(self) -> float:
+        """当前单次推理的显存估算（MB），随自适应学习更新。
+
+        批量推理需要按倍数评估显存占用，因此对外暴露该值。
+        """
+        return self._estimate_mb
+
     def total_memory_mb(self) -> Optional[float]:
         """显卡总显存（MB），非 GPU 环境返回 None。"""
         if not self.is_cuda:
